@@ -34,12 +34,17 @@ Health Check Path: /health
 Add `TRIPO_API_KEY` in Render's Environment settings. Render supplies `PORT`
 automatically, and the server binds to `0.0.0.0` when running there.
 
-Then run the desktop app in a second terminal. The client defaults to `http://127.0.0.1:8787`.
+Then run the desktop app in a second terminal. Development builds default to
+`http://127.0.0.1:8787`. Packaged release builds default to the deployed Desk Pal
+service at `https://desk-pal.onrender.com`.
 
 For distribution, host this service behind HTTPS and bake its public address into the app—the end user does not configure either the URL or Tripo credentials:
 
 ```bash
 DESK_PAL_SERVER_URL=https://your-generation-service.example npm run tauri build
 ```
+
+`DESK_PAL_SERVER_URL` remains available as an override for staging or a future
+custom domain.
 
 The prototype server limits each IP to five creation jobs per hour and removes completed job data after 24 hours. Production deployment should replace its in-memory job registry with durable storage and authenticated user quotas.

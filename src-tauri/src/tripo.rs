@@ -5,11 +5,16 @@ use std::{path::Path, sync::atomic::Ordering, time::Duration};
 use tauri::{AppHandle, Emitter, Manager};
 
 fn server_root() -> String {
+    let default = if cfg!(debug_assertions) {
+        "http://127.0.0.1:8787"
+    } else {
+        "https://desk-pal.onrender.com"
+    };
     std::env::var("DESK_PAL_SERVER_URL")
         .ok()
         .or_else(|| option_env!("DESK_PAL_SERVER_URL").map(str::to_string))
         .or_else(|| option_env!("NOCTURNE_SERVER_URL").map(str::to_string))
-        .unwrap_or_else(|| "http://127.0.0.1:8787".into())
+        .unwrap_or_else(|| default.into())
         .trim_end_matches('/')
         .to_string()
 }
