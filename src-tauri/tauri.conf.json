@@ -1,0 +1,73 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Desk Pal",
+  "version": "0.1.0",
+  "identifier": "app.nocturne.pet",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "macOSPrivateApi": true,
+    "windows": [
+      {
+        "label": "setup",
+        "title": "",
+        "width": 1180,
+        "height": 760,
+        "minWidth": 820,
+        "minHeight": 620,
+        "center": true,
+        "visible": false,
+        "decorations": true,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "trafficLightPosition": { "x": 16, "y": 23 },
+        "resizable": true
+      },
+      {
+        "label": "pet",
+        "url": "index.html?view=pet",
+        "width": 380,
+        "height": 520,
+        "visible": false,
+        "transparent": true,
+        "decorations": false,
+        "resizable": false,
+        "shadow": false,
+        "skipTaskbar": true,
+        "alwaysOnTop": true,
+        "focus": false
+      },
+      {
+        "label": "chat",
+        "url": "index.html?view=chat",
+        "width": 400,
+        "height": 520,
+        "visible": false,
+        "transparent": true,
+        "decorations": false,
+        "resizable": false,
+        "shadow": false,
+        "skipTaskbar": true,
+        "alwaysOnTop": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self' customprotocol: asset:; img-src 'self' asset: http://asset.localhost blob: data:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:*; script-src 'self' 'unsafe-eval'",
+      "assetProtocol": { "enable": true, "scope": ["$APPDATA/**"] }
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [],
+    "category": "Entertainment",
+    "shortDescription": "A tiny private AI companion for your desktop",
+    "longDescription": "Create an animated desktop companion from one image.",
+    "macOS": { "minimumSystemVersion": "12.0" },
+    "windows": { "webviewInstallMode": { "type": "downloadBootstrapper", "silent": true } }
+  }
+}
