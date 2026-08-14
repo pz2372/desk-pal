@@ -4,7 +4,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { extname, join } from "node:path";
 
 const PORT = Number(process.env.PORT || 8787);
-const HOST = process.env.HOST || "127.0.0.1";
+const HOST = process.env.HOST || (process.env.RENDER ? "0.0.0.0" : "127.0.0.1");
 const TRIPO_API_KEY = process.env.TRIPO_API_KEY;
 const API_ROOT = "https://api.tripo3d.ai/v2/openapi";
 const DATA_ROOT = new URL("./data/jobs/", import.meta.url).pathname;
