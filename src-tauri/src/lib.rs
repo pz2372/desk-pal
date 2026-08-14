@@ -90,6 +90,22 @@ fn use_image_candidate(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn use_model_candidate(app: AppHandle) -> Result<(), String> {
+    let model_path = {
+        let state = app.state::<RuntimeState>();
+        let candidate = state.inner.lock().map_err(|_| "State unavailable")?.generation.candidate_model_path.clone();
+        candidate
+    }.ok_or("The generated 3D model is unavailable.")?;
+    if !std::path::Path::new(&model_path).is_file() { return Err("The generated 3D model file is missing.".into()); }
+    mutate(&app, |state| {
+        state.generation.stage = GenerationStage::Completed;
+        state.generation.progress = 100.0;
+        state.generation.message = "Your static 3D pet is ready to preview.".into();
+        state.generation.error = None;
+    })
+}
+
+#[tauri::command]
 fn activate_pet(app: AppHandle, config: PetConfig) -> Result<(), String> {
     if config.name.trim().is_empty() || config.name.chars().count() > 28 { return Err("Pet names must contain 1–28 characters.".into()); }
     let (candidate, source, body) = {
@@ -295,7 +311,7 @@ pub fn run() {
         .on_window_event(|window, event| {
             if window.label() == "setup" { if let WindowEvent::CloseRequested { api, .. } = event { api.prevent_close(); let _ = window.hide(); } }
         })
-        .invoke_handler(tauri::generate_handler![get_app_snapshot, save_widget_position, start_generation, cancel_generation, use_image_candidate, activate_pet, delete_pet, discard_pet_candidate, set_paused, set_overlay_mode, set_cursor_passthrough, set_launch_on_startup, ensure_local_model, send_chat, clear_conversation])
+        .invoke_handler(tauri::generate_handler![get_app_snapshot, save_widget_position, start_generation, cancel_generation, use_image_candidate, use_model_candidate, activate_pet, delete_pet, discard_pet_candidate, set_paused, set_overlay_mode, set_cursor_passthrough, set_launch_on_startup, ensure_local_model, send_chat, clear_conversation])
         .run(tauri::generate_context!())
         .expect("error while running Desk Pal");
 }

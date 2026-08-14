@@ -11,6 +11,7 @@ const DATA_ROOT = new URL("./data/jobs/", import.meta.url).pathname;
 const jobs = new Map();
 const rateBuckets = new Map();
 const MAX_BODY = 28 * 1024 * 1024;
+const REQUIRED_PIPELINE_CREDITS = 105;
 
 function send(response, status, payload, headers = {}) {
   const body = Buffer.from(JSON.stringify(payload));
@@ -19,7 +20,7 @@ function send(response, status, payload, headers = {}) {
 }
 
 function publicJob(job) {
-  return { id: job.id, stage: job.stage, progress: job.progress, message: job.message, error: job.error, bodyType: job.bodyType, modelUrl: job.stage === "completed" ? `/v1/jobs/${job.id}/model?token=${job.token}` : undefined };
+  return { id: job.id, stage: job.stage, progress: job.progress, message: job.message, error: job.error, bodyType: job.bodyType, baseModelUrl: job.baseModelPath ? `/v1/jobs/${job.id}/base-model?token=${job.token}` : undefined, modelUrl: job.stage === "completed" ? `/v1/jobs/${job.id}/model?token=${job.token}` : undefined };
 }
 
 function allowRequest(ip) {
@@ -57,8 +58,26 @@ async function tripo(path, options = {}) {
     throw new Error(`Could not reach Tripo: ${detail}`);
   }
   const value = await response.json().catch(() => ({}));
-  if (!response.ok || (value.code !== undefined && value.code !== 0)) throw new Error(value.message || value.data?.message || `Tripo request failed (${response.status}).`);
+  if (!response.ok || (value.code !== undefined && value.code !== 0)) {
+    const message = value.message || value.data?.message || `Tripo request failed (${response.status}).`;
+    const traceId = response.headers.get("x-tripo-trace-id");
+    const error = new Error(traceId ? `${message} (reference ${traceId})` : message);
+    error.status = response.status;
+    error.providerCode = value.code;
+    error.traceId = traceId;
+    throw error;
+  }
   return value.data ?? value;
+}
+
+async function requireGenerationCapacity(job) {
+  const wallet = await tripo("/user/balance");
+  const available = Number(wallet.balance);
+  const frozen = Number(wallet.frozen || 0);
+  if (Number.isFinite(available) && available < REQUIRED_PIPELINE_CREDITS) {
+    console.warn("Generation blocked before upload", { jobId: job.id, available, frozen, required: REQUIRED_PIPELINE_CREDITS });
+    throw new Error("Pet creation is temporarily unavailable because generation capacity is low. Please try again later.");
+  }
 }
 
 async function createTask(body) {
@@ -87,8 +106,23 @@ function animations(bodyType) {
   return ["preset:idle", walks[bodyType] || "preset:walk", "preset:turn", "preset:jump", "preset:hurt"];
 }
 
+function outputModelUrl(task) {
+  const output = task.output || {};
+  return [output.pbr_model, output.model, output.model_url, output.model_urls?.[0], output.base_model, task.model_url, task.model].find((value) => typeof value === "string" && value.startsWith("http"));
+}
+
+async function downloadGlb(url, target) {
+  const response = await fetch(url, { signal: AbortSignal.timeout(90_000) });
+  if (!response.ok) throw new Error("Could not retrieve the generated model.");
+  const model = Buffer.from(await response.arrayBuffer());
+  if (model.length < 20 || model.subarray(0, 4).toString() !== "glTF") throw new Error("The provider returned an invalid GLB model.");
+  await writeFile(target, model);
+}
+
 async function generate(job, image, filename) {
   try {
+    update(job, "uploading", 3, "Checking generation capacity…");
+    await requireGenerationCapacity(job);
     update(job, "uploading", 5, "Uploading your character securely…");
     const form = new FormData(); form.append("file", new Blob([image.data], { type: image.mime }), filename);
     const uploaded = await tripo("/upload/sts", { method: "POST", body: form });
@@ -98,7 +132,14 @@ async function generate(job, image, filename) {
     update(job, "generating", 12, "Sculpting the 3D model…");
     const generationId = await createTask({ type: "image_to_model", file: { type: image.ext, file_token: fileToken }, model_version: "v3.1-20260211", texture: true, pbr: true, texture_quality: "standard" });
     job.providerTaskId = generationId;
-    await waitTask(job, generationId, 12, 52);
+    const generated = await waitTask(job, generationId, 12, 52);
+    const baseModelUrl = outputModelUrl(generated);
+    if (!baseModelUrl) throw new Error("3D generation completed without a downloadable model.");
+    update(job, "generating", 53, "Saving your 3D model…");
+    await mkdir(job.directory, { recursive: true });
+    const baseModelPath = join(job.directory, "base.glb");
+    await downloadGlb(baseModelUrl, baseModelPath);
+    job.baseModelPath = baseModelPath;
 
     update(job, "rig_check", 54, "Checking the creature’s body and limbs…");
     const checkId = await createTask({ type: "animate_prerigcheck", original_model_task_id: generationId });
@@ -113,19 +154,30 @@ async function generate(job, image, filename) {
     update(job, "animating", 78, "Teaching your pet to walk and react…");
     const animationId = await createTask({ type: "animate_retarget", original_model_task_id: rigId, out_format: "glb", animations: animations(job.bodyType), bake_animation: true, export_with_geometry: true, animate_in_place: true });
     const animated = await waitTask(job, animationId, 78, 92);
-    const modelUrl = animated.output?.model_url || animated.output?.model_urls?.[0] || animated.output?.model || animated.output?.pbr_model || animated.output?.base_model || animated.model_url || animated.model;
+    const modelUrl = outputModelUrl(animated);
     if (!modelUrl) throw new Error("Generation completed without a downloadable model.");
 
     update(job, "downloading", 94, "Bringing your pet home…");
-    const response = await fetch(modelUrl, { signal: AbortSignal.timeout(90_000) });
-    if (!response.ok) throw new Error("Could not retrieve the finished model.");
-    const model = Buffer.from(await response.arrayBuffer());
-    if (model.length < 20 || model.subarray(0, 4).toString() !== "glTF") throw new Error("The provider returned an invalid GLB model.");
     await mkdir(job.directory, { recursive: true });
-    job.modelPath = join(job.directory, "pet.glb"); await writeFile(job.modelPath, model);
+    const modelPath = join(job.directory, "pet.glb");
+    await downloadGlb(modelUrl, modelPath);
+    job.modelPath = modelPath;
     update(job, "completed", 100, "Your pet is ready to meet you.");
   } catch (error) {
-    job.stage = job.cancelled ? "cancelled" : "failed"; job.message = job.cancelled ? "Creation cancelled" : "Creation stopped"; job.error = error instanceof Error ? error.message : String(error);
+    const failedAt = job.stage;
+    const detail = error instanceof Error ? error.message : String(error);
+    console.error("Generation failed", {
+      jobId: job.id,
+      stage: failedAt,
+      providerTaskId: job.providerTaskId,
+      providerCode: error?.providerCode,
+      traceId: error?.traceId,
+      error: detail,
+    });
+    job.failureStage = failedAt;
+    job.stage = job.cancelled ? "cancelled" : "failed";
+    job.message = job.cancelled ? "Creation cancelled" : `Creation stopped during ${failedAt.replaceAll("_", " ")}`;
+    job.error = detail;
   }
 }
 
@@ -148,14 +200,15 @@ async function handler(request, response) {
       return send(response, 202, { id, token });
     } catch (error) { return send(response, 400, { error: error instanceof Error ? error.message : String(error) }); }
   }
-  const match = /^\/v1\/jobs\/([0-9a-f-]+)(?:\/(model))?$/.exec(url.pathname);
+  const match = /^\/v1\/jobs\/([0-9a-f-]+)(?:\/(model|base-model))?$/.exec(url.pathname);
   if (match) {
     const job = jobs.get(match[1]);
     if (!job || url.searchParams.get("token") !== job.token) return send(response, 404, { error: "Job not found." });
     if (request.method === "DELETE") { job.cancelled = true; return send(response, 202, { cancelled: true }); }
-    if (request.method === "GET" && match[2] === "model") {
-      if (job.stage !== "completed" || !job.modelPath) return send(response, 409, { error: "Model is not ready." });
-      const model = await readFile(job.modelPath); response.writeHead(200, { "content-type": "model/gltf-binary", "content-length": model.length, "cache-control": "private, no-store" }); return response.end(model);
+    if (request.method === "GET" && (match[2] === "model" || match[2] === "base-model")) {
+      const modelPath = match[2] === "base-model" ? job.baseModelPath : job.modelPath;
+      if (!modelPath || (match[2] === "model" && job.stage !== "completed")) return send(response, 409, { error: "Model is not ready." });
+      const model = await readFile(modelPath); response.writeHead(200, { "content-type": "model/gltf-binary", "content-length": model.length, "cache-control": "private, no-store" }); return response.end(model);
     }
     if (request.method === "GET") return send(response, 200, publicJob(job));
   }

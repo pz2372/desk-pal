@@ -25,6 +25,7 @@ struct RemoteJob {
     message: String,
     error: Option<String>,
     body_type: Option<String>,
+    base_model_url: Option<String>,
     model_url: Option<String>,
 }
 
@@ -45,6 +46,20 @@ async fn response_error(response: reqwest::Response) -> String {
 }
 
 fn publish(app: &AppHandle) { let _ = app.emit("generation-progress", ()); }
+
+fn remote_url(root: &str, value: &str) -> String {
+    if value.starts_with("http://") || value.starts_with("https://") { value.into() } else { format!("{root}{value}") }
+}
+
+async fn download_model(client: &reqwest::Client, url: String, target: &Path) -> Result<(), String> {
+    let response = client.get(url).send().await.map_err(|e| format!("Could not download the generated model: {e}"))?;
+    if !response.status().is_success() { return Err(response_error(response).await); }
+    let bytes = response.bytes().await.map_err(|e| e.to_string())?;
+    if bytes.len() < 20 || &bytes[..4] != b"glTF" { return Err("The generation service returned an invalid GLB model.".into()); }
+    if let Some(parent) = target.parent() { tokio::fs::create_dir_all(parent).await.map_err(|e| e.to_string())?; }
+    tokio::fs::write(target, &bytes).await.map_err(|e| e.to_string())?;
+    Ok(())
+}
 
 pub async fn run(app: AppHandle, generation_id: String, data_url: String, filename: String) {
     if let Err(error) = run_inner(&app, &generation_id, &data_url, &filename).await {
@@ -79,6 +94,15 @@ async fn run_inner(app: &AppHandle, generation_id: &str, data_url: &str, filenam
         let job = response.json::<RemoteJob>().await.map_err(|e| format!("The generation service returned invalid progress data: {e}"))?;
         let current_stage = stage(&job.stage);
         let detected_body = job.body_type.as_deref().map(body_type);
+        if let Some(base_model_url) = job.base_model_url.as_deref() {
+            let target = app_data_dir(app)?.join("candidate").join(generation_id).join("base.glb");
+            if !target.is_file() { download_model(&client, remote_url(&root, base_model_url), &target).await?; }
+            mutate(app, |value| {
+                if value.generation.id.as_deref() == Some(generation_id) {
+                    value.generation.candidate_model_path = Some(target.to_string_lossy().into());
+                }
+            })?;
+        }
         mutate(app, |value| {
             if value.generation.id.as_deref() == Some(generation_id) {
                 value.generation.stage = current_stage.clone();
@@ -92,16 +116,10 @@ async fn run_inner(app: &AppHandle, generation_id: &str, data_url: &str, filenam
         match current_stage {
             GenerationStage::Completed => {
                 let model_url = job.model_url.ok_or("The completed job did not include a model URL.")?;
-                let download_url = if model_url.starts_with("http://") || model_url.starts_with("https://") { model_url } else { format!("{root}{model_url}") };
                 mutate(app, |value| { value.generation.stage = GenerationStage::Downloading; value.generation.progress = 96.0; value.generation.message = "Saving your animated pet…".into(); })?;
                 publish(app);
-                let response = client.get(download_url).send().await.map_err(|e| format!("Could not download the generated model: {e}"))?;
-                if !response.status().is_success() { return Err(response_error(response).await); }
-                let bytes = response.bytes().await.map_err(|e| e.to_string())?;
-                if bytes.len() < 20 || &bytes[..4] != b"glTF" { return Err("The generation service returned an invalid GLB model.".into()); }
                 let target = app_data_dir(app)?.join("candidate").join(generation_id).join("pet.glb");
-                if let Some(parent) = target.parent() { tokio::fs::create_dir_all(parent).await.map_err(|e| e.to_string())?; }
-                tokio::fs::write(&target, &bytes).await.map_err(|e| e.to_string())?;
+                download_model(&client, remote_url(&root, &model_url), &target).await?;
                 if !Path::new(&target).is_file() { return Err("The generated model could not be saved.".into()); }
                 mutate(app, |value| {
                     value.generation.stage = GenerationStage::Completed;

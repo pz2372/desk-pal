@@ -18,6 +18,7 @@ export const getSnapshot = () => command<AppSnapshot>("get_app_snapshot");
 export const startGeneration = (dataUrl: string, filename: string) => command<string>("start_generation", { dataUrl, filename });
 export const cancelGeneration = () => command<void>("cancel_generation");
 export const useImageCandidate = () => command<void>("use_image_candidate");
+export const useModelCandidate = () => command<void>("use_model_candidate");
 export const activatePet = (config: PetConfig) => command<void>("activate_pet", { config });
 export const setPaused = (paused: boolean) => command<void>("set_paused", { paused });
 export const setOverlayMode = (mode: PetConfig["overlayMode"]) => command<void>("set_overlay_mode", { mode });
