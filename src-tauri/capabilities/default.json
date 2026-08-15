@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Capabilities for Desk Pal windows",
-  "windows": ["setup", "pet", "chat"],
+  "windows": ["setup", "pet-*", "chat"],
   "permissions": [
     "core:default",
     "core:window:allow-set-position",

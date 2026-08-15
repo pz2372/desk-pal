@@ -6,7 +6,7 @@ const browserSnapshot: AppSnapshot = { ...EMPTY_SNAPSHOT };
 
 export async function command<T>(name: string, args: Record<string, unknown> = {}): Promise<T> {
   if (isTauri()) return invoke<T>(name, args);
-  if (name === "get_app_snapshot") return structuredClone(browserSnapshot) as T;
+  if (name === "get_app_snapshot" || name === "get_pet_snapshot") return structuredClone(browserSnapshot) as T;
   if (name === "send_chat") {
     const message = String(args.message ?? "");
     return { reply: `I heard “${message.slice(0, 42)}.” ✦`, emotion: "curious", action: "react", localModel: false } as T;
@@ -15,16 +15,18 @@ export async function command<T>(name: string, args: Record<string, unknown> = {
 }
 
 export const getSnapshot = () => command<AppSnapshot>("get_app_snapshot");
+export const getPetSnapshot = (petId: string) => command<AppSnapshot>("get_pet_snapshot", { petId });
+export const selectPet = (petId: string) => command<void>("select_pet", { petId });
 export const startGeneration = (dataUrl: string, filename: string) => command<string>("start_generation", { dataUrl, filename });
 export const cancelGeneration = () => command<void>("cancel_generation");
 export const useImageCandidate = () => command<void>("use_image_candidate");
 export const useModelCandidate = () => command<void>("use_model_candidate");
 export const activatePet = (config: PetConfig) => command<void>("activate_pet", { config });
-export const setPaused = (paused: boolean) => command<void>("set_paused", { paused });
-export const setOverlayMode = (mode: PetConfig["overlayMode"]) => command<void>("set_overlay_mode", { mode });
+export const setPaused = (paused: boolean, petId?: string) => command<void>("set_paused", { paused, petId });
+export const setOverlayMode = (mode: PetConfig["overlayMode"], petId?: string) => command<void>("set_overlay_mode", { mode, petId });
 export const setCursorPassThrough = (ignore: boolean) => command<void>("set_cursor_passthrough", { ignore });
 export const ensureLocalModel = () => command<void>("ensure_local_model");
-export const sendChat = (message: string) => command<LocalAiReply>("send_chat", { message });
+export const sendChat = (message: string, petId?: string) => command<LocalAiReply>("send_chat", { message, petId });
 export const clearConversation = () => command<void>("clear_conversation");
 export const deletePet = () => command<void>("delete_pet");
 export const discardPetCandidate = () => command<void>("discard_pet_candidate");

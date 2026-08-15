@@ -87,6 +87,20 @@ pub struct PetAsset {
     pub created_at: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PetRecord {
+    pub id: String,
+    pub config: PetConfig,
+    pub asset: PetAsset,
+    #[serde(default)]
+    pub paused: bool,
+    #[serde(default = "default_true")]
+    pub visible: bool,
+}
+
+fn default_true() -> bool { true }
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct GenerationState {
@@ -131,11 +145,15 @@ pub struct PersistedState {
     pub model_download: ModelDownloadState,
     #[serde(default)]
     pub widget_position: Option<WidgetPosition>,
+    #[serde(default)]
+    pub pets: Vec<PetRecord>,
+    #[serde(default)]
+    pub selected_pet_id: Option<String>,
 }
 
 impl Default for PersistedState {
     fn default() -> Self {
-        Self { lifecycle: AppLifecycle::NeedsSetup, pet: None, asset: None, generation: GenerationState { message: "Ready".into(), ..Default::default() }, paused: false, visible: true, conversation: vec![], conversation_summary: String::new(), model_download: ModelDownloadState::default(), widget_position: None }
+        Self { lifecycle: AppLifecycle::NeedsSetup, pet: None, asset: None, generation: GenerationState { message: "Ready".into(), ..Default::default() }, paused: false, visible: true, conversation: vec![], conversation_summary: String::new(), model_download: ModelDownloadState::default(), widget_position: None, pets: Vec::new(), selected_pet_id: None }
     }
 }
 
@@ -151,6 +169,8 @@ pub struct AppSnapshot {
     pub model_installed: bool,
     pub model_download: ModelDownloadState,
     pub widget_position: Option<WidgetPosition>,
+    pub pets: Vec<PetRecord>,
+    pub selected_pet_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

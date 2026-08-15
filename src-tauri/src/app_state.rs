@@ -1,4 +1,4 @@
-use crate::models::{AppLifecycle, CharacterProfile, PersistedState};
+use crate::models::{AppLifecycle, CharacterProfile, PetRecord, PersistedState};
 use std::{fs, path::PathBuf, sync::{atomic::AtomicBool, Mutex}};
 use tauri::{AppHandle, Manager};
 use tokio::sync::Mutex as AsyncMutex;
@@ -28,11 +28,31 @@ pub fn model_path(app: &AppHandle) -> Result<PathBuf, String> { Ok(app_data_dir(
 
 pub fn load(app: &AppHandle) -> PersistedState {
     let mut value = state_path(app).ok().and_then(|path| fs::read(path).ok()).and_then(|data| serde_json::from_slice::<PersistedState>(&data).ok()).unwrap_or_default();
-    let asset_ok = value.asset.as_ref().map(|a| {
+    let legacy_ok = value.asset.as_ref().map(|a| {
         std::path::Path::new(&a.source_image_path).is_file()
             && a.model_path.as_ref().map(|path| std::path::Path::new(path).is_file()).unwrap_or(true)
     }).unwrap_or(false);
-    if !asset_ok { value.asset = None; value.pet = None; value.lifecycle = AppLifecycle::NeedsSetup; }
+    if value.pets.is_empty() && legacy_ok {
+        if let (Some(config), Some(asset)) = (value.pet.clone(), value.asset.clone()) {
+            let id = format!("pet-{}", asset.created_at);
+            value.pets.push(PetRecord { id: id.clone(), config, asset, paused: value.paused, visible: value.visible });
+            value.selected_pet_id = Some(id);
+        }
+    }
+    value.pets.retain(|pet| {
+        std::path::Path::new(&pet.asset.source_image_path).is_file()
+            && pet.asset.model_path.as_ref().map(|path| std::path::Path::new(path).is_file()).unwrap_or(true)
+    });
+    for pet in &mut value.pets {
+        if pet.asset.character_profile.capabilities.is_empty() {
+            pet.asset.character_profile = CharacterProfile::for_body_type(&pet.asset.body_type);
+        }
+    }
+    if value.selected_pet_id.as_ref().is_none_or(|id| !value.pets.iter().any(|pet| &pet.id == id)) {
+        value.selected_pet_id = value.pets.first().map(|pet| pet.id.clone());
+    }
+    sync_selected(&mut value);
+    if value.pets.is_empty() { value.lifecycle = AppLifecycle::NeedsSetup; }
     if let Some(asset) = &mut value.asset {
         if asset.character_profile.capabilities.is_empty() {
             asset.character_profile = CharacterProfile::for_body_type(&asset.body_type);
@@ -45,6 +65,23 @@ pub fn load(app: &AppHandle) -> PersistedState {
     }
     value.model_download.downloading = false;
     value
+}
+
+pub fn sync_selected(value: &mut PersistedState) {
+    let selected = value.selected_pet_id.as_ref().and_then(|id| value.pets.iter().find(|pet| &pet.id == id)).cloned();
+    if let Some(pet) = selected {
+        value.pet = Some(pet.config);
+        value.asset = Some(pet.asset);
+        value.paused = pet.paused;
+        value.visible = pet.visible;
+        value.lifecycle = AppLifecycle::Ready;
+    } else {
+        value.pet = None;
+        value.asset = None;
+        value.paused = false;
+        value.visible = false;
+        value.lifecycle = AppLifecycle::NeedsSetup;
+    }
 }
 
 pub fn save(app: &AppHandle, value: &PersistedState) -> Result<(), String> {

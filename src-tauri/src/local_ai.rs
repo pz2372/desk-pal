@@ -97,13 +97,16 @@ fn parse_reply(raw: &str) -> Option<LocalAiReply> {
     Some(LocalAiReply { reply: reply.into(), emotion: emotion.into(), action: action.into(), local_model: true })
 }
 
-pub async fn chat(app: &AppHandle, message: String) -> Result<LocalAiReply, String> {
+pub async fn chat(app: &AppHandle, message: String, pet_id: Option<String>) -> Result<LocalAiReply, String> {
     let clean = message.trim();
     if clean.is_empty() || clean.chars().count() > 300 { return Err("Messages must contain 1–300 characters.".into()); }
     let (pet, capabilities, history, summary) = {
         let state = app.state::<RuntimeState>();
         let guard = state.inner.lock().map_err(|_| "State unavailable")?;
-        (guard.pet.clone().ok_or("No active pet")?, guard.asset.as_ref().map(|asset| asset.character_profile.capabilities.clone()).unwrap_or_default(), guard.conversation.iter().rev().take(12).cloned().collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>(), guard.conversation_summary.clone())
+        let record = pet_id.as_ref().and_then(|id| guard.pets.iter().find(|pet| &pet.id == id));
+        let pet = record.map(|pet| pet.config.clone()).or_else(|| guard.pet.clone()).ok_or("No active pet")?;
+        let capabilities = record.map(|pet| pet.asset.character_profile.capabilities.clone()).or_else(|| guard.asset.as_ref().map(|asset| asset.character_profile.capabilities.clone())).unwrap_or_default();
+        (pet, capabilities, guard.conversation.iter().rev().take(12).cloned().collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>(), guard.conversation_summary.clone())
     };
     let mut allowed_actions = vec!["idle"];
     if capabilities.iter().any(|value| value == "walk" || value == "fly" || value == "swim") { allowed_actions.push("walk"); }

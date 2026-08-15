@@ -5,7 +5,7 @@ import { isTauri } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { AppSnapshot, Personality, PetConfig } from "../types";
 import { EMPTY_SNAPSHOT } from "../types";
-import { activatePet, assetUrl, cancelGeneration, deletePet, discardPetCandidate, getSnapshot, startGeneration, useImageCandidate, useModelCandidate } from "../lib/native";
+import { activatePet, assetUrl, cancelGeneration, deletePet, discardPetCandidate, getSnapshot, selectPet, startGeneration, useImageCandidate, useModelCandidate } from "../lib/native";
 import { fileAsDataUrl, validateImage } from "../lib/validation";
 import { ModelStage } from "./ModelStage";
 
@@ -15,6 +15,7 @@ const personalities: { id: Personality; label: string; copy: string }[] = [
   { id: "calm", label: "Calm", copy: "Gentle, thoughtful, and quietly reassuring." },
   { id: "chaotic", label: "Chaotic", copy: "Curious, surprising, and bursting with energy." }
 ];
+const newPetConfig = (): PetConfig => ({ name: "", personality: "friendly", personalityNote: "", launchOnStartup: true, overlayMode: "always_on_top", chatMode: "on_click" });
 
 export function SetupFlow() {
   const [snapshot, setSnapshot] = useState<AppSnapshot>(EMPTY_SNAPSHOT);
@@ -27,7 +28,7 @@ export function SetupFlow() {
   const [error, setError] = useState<string>();
   const [showError, setShowError] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [config, setConfig] = useState<PetConfig>({ name: "", personality: "friendly", personalityNote: "", launchOnStartup: true, overlayMode: "always_on_top", chatMode: "on_click" });
+  const [config, setConfig] = useState<PetConfig>(newPetConfig());
 
   useEffect(() => { getSnapshot().then((value) => {
     setSnapshot(value);
@@ -42,7 +43,7 @@ export function SetupFlow() {
       const latest = await getSnapshot();
       setSnapshot(latest);
       if (latest.pet) setConfig(latest.pet);
-      if (payload === "replace") { setScreen("onboarding"); setStep(1); }
+      if (payload === "replace") { setConfig(newPetConfig()); setFile(undefined); setImageUrl(undefined); setScreen("onboarding"); setStep(1); }
       else if (payload === "welcome") { setScreen("onboarding"); setStep(0); }
       else { setScreen("controls"); setControlTab("pet"); }
     });
@@ -119,8 +120,20 @@ export function SetupFlow() {
     setBusy(true); setError(undefined);
     try {
       await deletePet();
-      setShowDeleteWarning(false); setSnapshot(EMPTY_SNAPSHOT); setConfig({ name: "", personality: "friendly", personalityNote: "", launchOnStartup: true, overlayMode: "always_on_top", chatMode: "on_click" }); setFile(undefined); setImageUrl(undefined); setScreen("onboarding"); setStep(0);
+      const latest = await getSnapshot();
+      setShowDeleteWarning(false); setSnapshot(latest); setConfig(latest.pet ?? newPetConfig()); setFile(undefined); setImageUrl(undefined);
+      if (latest.pets.length) { setScreen("controls"); setControlTab("pet"); } else { setScreen("onboarding"); setStep(0); }
     } catch (e) { setError(String(e)); } finally { setBusy(false); }
+  }
+
+  async function choosePet(petId: string) {
+    setBusy(true); setError(undefined);
+    try { await selectPet(petId); const latest = await getSnapshot(); setSnapshot(latest); if (latest.pet) setConfig(latest.pet); setControlTab("pet"); }
+    catch (e) { setError(String(e)); } finally { setBusy(false); }
+  }
+
+  function createNewPet() {
+    setConfig(newPetConfig()); setFile(undefined); setImageUrl(undefined); setError(undefined); setScreen("onboarding"); setStep(1);
   }
 
   async function returnToControls() {
@@ -141,7 +154,7 @@ export function SetupFlow() {
     <div className="window-drag-region" data-tauri-drag-region onMouseDown={startWindowDrag} />
     <section className="setup-card">
       <aside className="setup-aside">
-        {screen === "controls" ? <><div><p className="eyebrow">PET CONTROL CENTER</p><h1>Make Desk Pal<br /><em>yours.</em></h1><p className="lede">Adjust how your companion behaves, chats, and appears on your desktop.</p></div><div className="pet-list"><button className={`pet-profile-button ${controlTab === "pet" ? "active" : ""}`} onClick={() => setControlTab("pet")}><span className="pet-profile-image">{snapshot.asset?.sourceImagePath ? <img src={assetUrl(snapshot.asset.sourceImagePath)} alt={config.name || "Pet"} /> : <PawPrint />}</span><span><strong>{config.name || "Your pet"}</strong><small>Pet controls</small></span></button><button className="create-pet-button" onClick={() => { setScreen("onboarding"); setStep(1); }}><ImagePlus /> Create New Pet</button></div></> : <><div><p className="eyebrow">YOUR DESKTOP COMPANION</p><h1>Bring a character<br />to <em>life.</em></h1><p className="lede">One image becomes a tiny 3D companion that lives quietly at the edge of your screen.</p></div><div className="onboarding-navigation">{snapshot.asset && <button className="return-controls-button" disabled={busy} onClick={returnToControls}><ChevronLeft /> Back to Pet Controls</button>}<ol className="step-list">{["Welcome", "Choose image", "Create model", "Preview", "Personality"].map((label, index) => <li className={index === step ? "active" : index < step ? "complete" : ""} key={label}><span>{index < step ? <Check size={13} /> : index + 1}</span>{label}</li>)}</ol></div></>}
+        {screen === "controls" ? <><div><p className="eyebrow">PET CONTROL CENTER</p><h1>Make Desk Pal<br /><em>yours.</em></h1><p className="lede">Choose a pet to adjust its personality and desktop behavior.</p></div><div className="pet-list">{snapshot.pets.map((pet) => <button key={pet.id} className={`pet-profile-button ${controlTab === "pet" && snapshot.selectedPetId === pet.id ? "active" : ""}`} onClick={() => choosePet(pet.id)}><span className="pet-profile-image"><img src={assetUrl(pet.asset.sourceImagePath)} alt={pet.config.name || "Pet"} /></span><span><strong>{pet.config.name || "Your pet"}</strong><small>{pet.asset.modelPath ? "3D pet" : "Image pet"}</small></span></button>)}<button className="create-pet-button" onClick={createNewPet}><ImagePlus /> Create New Pet</button></div></> : <><div><p className="eyebrow">YOUR DESKTOP COMPANION</p><h1>Bring a character<br />to <em>life.</em></h1><p className="lede">One image becomes a tiny 3D companion that lives quietly at the edge of your screen.</p></div><div className="onboarding-navigation">{snapshot.pets.length > 0 && <button className="return-controls-button" disabled={busy} onClick={returnToControls}><ChevronLeft /> Back to Pet Controls</button>}<ol className="step-list">{["Welcome", "Choose image", "Create model", "Preview", "Personality"].map((label, index) => <li className={index === step ? "active" : index < step ? "complete" : ""} key={label}><span>{index < step ? <Check size={13} /> : index + 1}</span>{label}</li>)}</ol></div></>}
         <p className="privacy-note"><ShieldCheck size={16} /> Your chat and pet stay on this computer.</p>
         {screen === "controls" && <button className={`account-nav-button ${controlTab === "account" ? "active" : ""}`} onClick={() => setControlTab("account")}><CircleUserRound /><span><strong>Account</strong></span></button>}
       </aside>
@@ -158,6 +171,6 @@ export function SetupFlow() {
         {activeError && showError && <div className="error-banner" role="alert">{activeError}</div>}
       </div>
     </section>
-    {showDeleteWarning && <div className="modal-backdrop" role="presentation"><section className="warning-modal" role="alertdialog" aria-modal="true" aria-labelledby="delete-pet-title"><div className="warning-icon"><Trash2 /></div><p className="eyebrow">PERMANENT ACTION</p><h2 id="delete-pet-title">Delete {config.name || "this pet"}?</h2><p>This removes the pet image, personality, preferences, and conversation history from this computer. This cannot be undone.</p><div className="warning-actions"><button className="ghost-button" disabled={busy} onClick={() => setShowDeleteWarning(false)}>Cancel</button><button className="danger-button" disabled={busy} onClick={confirmDeletePet}>{busy ? <LoaderCircle className="spin" /> : <><Trash2 /> Delete pet</>}</button></div></section></div>}
+    {showDeleteWarning && <div className="modal-backdrop" role="presentation"><section className="warning-modal" role="alertdialog" aria-modal="true" aria-labelledby="delete-pet-title"><div className="warning-icon"><Trash2 /></div><p className="eyebrow">PERMANENT ACTION</p><h2 id="delete-pet-title">Delete {config.name || "this pet"}?</h2><p>This removes this pet’s model, image, personality, and preferences from this computer. Your other pets stay unchanged. This cannot be undone.</p><div className="warning-actions"><button className="ghost-button" disabled={busy} onClick={() => setShowDeleteWarning(false)}>Cancel</button><button className="danger-button" disabled={busy} onClick={confirmDeletePet}>{busy ? <LoaderCircle className="spin" /> : <><Trash2 /> Delete pet</>}</button></div></section></div>}
   </main>;
 }

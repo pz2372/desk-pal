@@ -69,12 +69,12 @@ textarea { resize: none; min-height: 70px; }.text-input:focus, textarea:focus { 
 .personality-panel .switch-row { margin: 0; padding: 10px 0; }
 .pet-profile-button, .account-nav-button { width: 100%; display: flex; align-items: center; gap: 12px; padding: 10px; color: #aaa7b7; text-align: left; border: 1px solid transparent; border-radius: 14px; background: transparent; cursor: pointer; }
 .pet-profile-button { margin: 28px 0; }
-.pet-list { margin: 28px 0; display: grid; gap: 9px; }
+.pet-list { margin: 24px 0; max-height: 300px; padding-right: 4px; display: grid; gap: 8px; overflow-y: auto; scrollbar-width: thin; scrollbar-color: #248dff55 transparent; }
 .pet-list .pet-profile-button { margin: 0; }
 .create-pet-button { min-height: 42px; display: flex; align-items: center; justify-content: center; gap: 8px; color: #8fc7ff; border: 1px dashed #3a94eb66; border-radius: 12px; background: #087cff0c; font-size: 12px; font-weight: 600; cursor: pointer; }
 .create-pet-button svg { width: 16px; }
 .pet-profile-button.active, .account-nav-button.active { color: #fff; border-color: #3899ff55; background: #087cff16; box-shadow: inset 0 0 18px #087cff10; }
-.pet-profile-image { width: 50px; height: 50px; flex: 0 0 auto; display: grid; place-items: center; overflow: hidden; border: 1px solid #ffffff22; border-radius: 13px; background: #171b28; }
+.pet-profile-image { width: 44px; height: 44px; flex: 0 0 auto; display: grid; place-items: center; overflow: hidden; border: 1px solid #ffffff22; border-radius: 12px; background: #171b28; }
 .pet-profile-image img { width: 100%; height: 100%; object-fit: contain; }
 .pet-profile-button > span:last-child, .account-nav-button > span:last-child { display: grid; gap: 3px; }
 .pet-profile-button strong, .account-nav-button strong { font-size: 14px; }

@@ -26,6 +26,14 @@ export interface PetAsset {
   createdAt: string;
 }
 
+export interface PetRecord {
+  id: string;
+  config: PetConfig;
+  asset: PetAsset;
+  paused: boolean;
+  visible: boolean;
+}
+
 export interface CharacterProfile {
   species: string;
   skeletonFamily: SkeletonFamily;
@@ -56,6 +64,8 @@ export interface AppSnapshot {
   modelInstalled: boolean;
   modelDownload: { downloading: boolean; progress: number; error?: string };
   widgetPosition?: { x: number; y: number };
+  pets: PetRecord[];
+  selectedPetId?: string;
 }
 
 export interface LocalAiReply {
@@ -73,5 +83,6 @@ export const EMPTY_SNAPSHOT: AppSnapshot = {
   paused: false,
   visible: true,
   modelInstalled: false,
-  modelDownload: { downloading: false, progress: 0 }
+  modelDownload: { downloading: false, progress: 0 },
+  pets: []
 };

@@ -5,10 +5,13 @@ import { isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { AppSnapshot, LocalAiReply, PetAction } from "../types";
 import { EMPTY_SNAPSHOT } from "../types";
-import { assetUrl, ensureLocalModel, getSnapshot, sendChat, setCursorPassThrough } from "../lib/native";
+import { assetUrl, ensureLocalModel, getPetSnapshot, getSnapshot, sendChat, setCursorPassThrough } from "../lib/native";
 import { ModelStage } from "./ModelStage";
 
 export function PetOverlay() {
+  const params = new URLSearchParams(window.location.search);
+  const petId = params.get("petId") ?? undefined;
+  const slot = Number(params.get("slot") || 0);
   const [snapshot, setSnapshot] = useState<AppSnapshot>(EMPTY_SNAPSHOT);
   const [chatOpen, setChatOpen] = useState(false);
   const [message, setMessage] = useState("");
@@ -17,12 +20,14 @@ export function PetOverlay() {
   const [showPetReply, setShowPetReply] = useState(false);
   const [thinking, setThinking] = useState(false);
   const [action, setAction] = useState<PetAction>("idle");
-  const [direction, setDirection] = useState(1);
-  const position = useRef({ x: 80, last: performance.now() });
+  const [direction, setDirection] = useState(slot % 2 ? -1 : 1);
+  const initialRange = Math.max(1, window.screen.availWidth - 380);
+  const initialLeft = (window.screen as Screen & { availLeft?: number }).availLeft ?? 0;
+  const position = useRef({ x: initialLeft + (60 + slot * 230) % initialRange, last: performance.now() });
   const persistentChat = snapshot.pet?.chatMode === "glass_widget";
 
   useEffect(() => {
-    const refresh = () => getSnapshot().then(setSnapshot);
+    const refresh = () => (petId ? getPetSnapshot(petId) : getSnapshot()).then(setSnapshot);
     refresh();
     const timer = setInterval(refresh, snapshot.modelDownload.downloading ? 700 : 4000);
     const stop = isTauri() ? listen("pet-updated", refresh) : Promise.resolve(() => {});
@@ -30,7 +35,7 @@ export function PetOverlay() {
       setReply(payload); setAction(payload.action); setThinking(false); setChatOpen(false); setShowPetReply(true);
     }) : Promise.resolve(() => {});
     return () => { clearInterval(timer); stop.then((unlisten) => unlisten()); replyStop.then((unlisten) => unlisten()); };
-  }, [snapshot.modelDownload.downloading]);
+  }, [snapshot.modelDownload.downloading, petId]);
 
   useEffect(() => {
     if (persistentChat) setChatOpen(false);
@@ -47,7 +52,7 @@ export function PetOverlay() {
         const screen = window.screen as Screen & { availLeft?: number; availTop?: number };
         const left = screen.availLeft ?? 0;
         const right = left + window.screen.availWidth - width;
-        position.current.x += direction * 34 * delta;
+        position.current.x += direction * (28 + (slot % 5) * 5) * delta;
         if (position.current.x >= right) { position.current.x = right; setDirection(-1); setAction("turn"); }
         else if (position.current.x <= left) { position.current.x = left; setDirection(1); setAction("turn"); }
         else setAction("walk");
@@ -107,7 +112,7 @@ export function PetOverlay() {
     setChatOpen(false); setShowPetReply(true);
     try {
       const value = await Promise.race<LocalAiReply>([
-        sendChat(sent),
+        sendChat(sent, petId),
         new Promise((resolve) => window.setTimeout(() => resolve({ reply: `Hi! ${snapshot.pet?.name ?? "Your pet"} is glad you stopped by.`, emotion: "happy", action: "jump", localModel: false }), 6000))
       ]);
       setReply(value); setAction(value.action);

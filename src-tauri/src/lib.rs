@@ -3,10 +3,10 @@ mod local_ai;
 mod models;
 mod tripo;
 
-use app_state::{app_data_dir, model_path, mutate, RuntimeState};
-use models::{AppLifecycle, AppSnapshot, CharacterProfile, ChatMode, GenerationStage, LocalAiReply, OverlayMode, PetAsset, PetConfig, WidgetPosition};
+use app_state::{app_data_dir, model_path, mutate, sync_selected, RuntimeState};
+use models::{AppLifecycle, AppSnapshot, CharacterProfile, ChatMode, GenerationStage, LocalAiReply, OverlayMode, PetAsset, PetConfig, PetRecord, WidgetPosition};
 use std::{fs, sync::atomic::Ordering};
-use tauri::{image::Image, menu::{MenuBuilder, MenuItem}, tray::TrayIconBuilder, AppHandle, Emitter, Manager, State, WebviewWindow, WindowEvent};
+use tauri::{image::Image, menu::{MenuBuilder, MenuItem}, tray::TrayIconBuilder, AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent};
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 
 fn show_setup(app: &AppHandle, mode: &str) {
@@ -16,8 +16,47 @@ fn show_setup(app: &AppHandle, mode: &str) {
     }
 }
 
-fn apply_overlay(app: &AppHandle, mode: &OverlayMode) {
-    if let Some(window) = app.get_webview_window("pet") { let _ = window.set_always_on_top(*mode == OverlayMode::AlwaysOnTop); }
+fn pet_window_label(id: &str) -> String { format!("pet-{id}") }
+
+fn emit_pet_updates(app: &AppHandle) {
+    for window in app.webview_windows().into_values().filter(|window| window.label().starts_with("pet-")) {
+        let _ = window.emit("pet-updated", ());
+    }
+    let _ = app.emit_to("chat", "pet-updated", ());
+}
+
+fn sync_pet_windows(app: &AppHandle) -> Result<(), String> {
+    let pets = app.state::<RuntimeState>().inner.lock().map_err(|_| "State unavailable")?.pets.clone();
+    let wanted: Vec<String> = pets.iter().map(|pet| pet_window_label(&pet.id)).collect();
+    for (label, window) in app.webview_windows() {
+        if label.starts_with("pet-") && !wanted.contains(&label) { let _ = window.close(); }
+    }
+    for (index, pet) in pets.iter().enumerate() {
+        let label = pet_window_label(&pet.id);
+        if let Some(window) = app.get_webview_window(&label) {
+            let _ = window.set_always_on_top(pet.config.overlay_mode == OverlayMode::AlwaysOnTop);
+            if pet.visible { let _ = window.show(); } else { let _ = window.hide(); }
+            continue;
+        }
+        let url = WebviewUrl::App(format!("index.html?view=pet&petId={}&slot={index}", pet.id).into());
+        WebviewWindowBuilder::new(app, &label, url)
+            .inner_size(380.0, 520.0)
+            .transparent(true)
+            .decorations(false)
+            .resizable(false)
+            .shadow(false)
+            .skip_taskbar(true)
+            .always_on_top(pet.config.overlay_mode == OverlayMode::AlwaysOnTop)
+            .focused(false)
+            .visible(pet.visible)
+            .build()
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+fn snapshot(app: &AppHandle, value: models::PersistedState) -> Result<AppSnapshot, String> {
+    Ok(AppSnapshot { lifecycle: value.lifecycle, pet: value.pet, asset: value.asset, generation: value.generation, paused: value.paused, visible: value.visible, model_installed: model_path(app)?.is_file(), model_download: value.model_download, widget_position: value.widget_position, pets: value.pets, selected_pet_id: value.selected_pet_id })
 }
 
 fn sync_chat_widget(app: &AppHandle, mode: &ChatMode, ready: bool) {
@@ -34,7 +73,32 @@ fn set_autostart(app: &AppHandle, enabled: bool) -> Result<(), String> {
 #[tauri::command]
 fn get_app_snapshot(app: AppHandle, state: State<'_, RuntimeState>) -> Result<AppSnapshot, String> {
     let value = state.inner.lock().map_err(|_| "Application state is unavailable")?.clone();
-    Ok(AppSnapshot { lifecycle: value.lifecycle, pet: value.pet, asset: value.asset, generation: value.generation, paused: value.paused, visible: value.visible, model_installed: model_path(&app)?.is_file(), model_download: value.model_download, widget_position: value.widget_position })
+    snapshot(&app, value)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn get_pet_snapshot(app: AppHandle, state: State<'_, RuntimeState>, pet_id: String) -> Result<AppSnapshot, String> {
+    let mut value = state.inner.lock().map_err(|_| "Application state is unavailable")?.clone();
+    let pet = value.pets.iter().find(|pet| pet.id == pet_id).cloned().ok_or("Pet not found")?;
+    value.pet = Some(pet.config);
+    value.asset = Some(pet.asset);
+    value.paused = pet.paused;
+    value.visible = pet.visible;
+    snapshot(&app, value)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn select_pet(app: AppHandle, pet_id: String) -> Result<(), String> {
+    mutate(&app, |state| {
+        if state.pets.iter().any(|pet| pet.id == pet_id) {
+            state.selected_pet_id = Some(pet_id.clone());
+            sync_selected(state);
+        }
+    })?;
+    let mode = app.state::<RuntimeState>().inner.lock().map_err(|_| "State unavailable")?.pet.as_ref().map(|pet| pet.chat_mode.clone()).unwrap_or_default();
+    sync_chat_widget(&app, &mode, true);
+    emit_pet_updates(&app);
+    Ok(())
 }
 
 #[tauri::command]
@@ -108,54 +172,84 @@ fn use_model_candidate(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 fn activate_pet(app: AppHandle, config: PetConfig) -> Result<(), String> {
     if config.name.trim().is_empty() || config.name.chars().count() > 28 { return Err("Pet names must contain 1–28 characters.".into()); }
-    let (candidate, source, body) = {
+    let (is_new, candidate, source, body, selected_id) = {
         let state = app.state::<RuntimeState>();
         let value = state.inner.lock().map_err(|_| "State unavailable")?;
-        if !matches!(value.generation.stage, GenerationStage::Completed) && value.asset.is_none() { return Err("Finish creating a pet before activating it.".into()); }
+        if !matches!(value.generation.stage, GenerationStage::Completed) && value.selected_pet_id.is_none() { return Err("Finish creating a pet before activating it.".into()); }
         if matches!(value.generation.stage, GenerationStage::Completed) {
-            (value.generation.candidate_model_path.clone(), value.generation.candidate_source_path.clone(), value.generation.body_type.clone().unwrap_or_default())
+            (true, value.generation.candidate_model_path.clone(), value.generation.candidate_source_path.clone(), value.generation.body_type.clone().unwrap_or_default(), None)
         } else {
-            let asset = value.asset.clone().ok_or("No pet asset exists")?;
-            (asset.model_path, Some(asset.source_image_path), asset.body_type)
+            let id = value.selected_pet_id.clone().ok_or("No pet is selected")?;
+            let pet = value.pets.iter().find(|pet| pet.id == id).ok_or("No pet asset exists")?;
+            (false, pet.asset.model_path.clone(), Some(pet.asset.source_image_path.clone()), pet.asset.body_type.clone(), Some(id))
         }
     };
-    let active = app_data_dir(&app)?.join("active"); fs::create_dir_all(&active).map_err(|e| e.to_string())?;
-    let active_model_path = if let Some(source_model) = candidate {
-        if !std::path::Path::new(&source_model).is_file() { return Err("The generated model file is missing or corrupt.".into()); }
-        let model_target = active.join("pet.glb");
-        if std::path::Path::new(&source_model) != model_target { fs::copy(&source_model, &model_target).map_err(|e| e.to_string())?; }
-        Some(model_target.to_string_lossy().into())
-    } else { None };
-    let source_image = source.ok_or("The source image is missing")?;
-    let source_ext = std::path::Path::new(&source_image).extension().and_then(|s| s.to_str()).unwrap_or("png");
-    let image_target = active.join(format!("source.{source_ext}"));
-    if std::path::Path::new(&source_image) != image_target { fs::copy(source_image, &image_target).map_err(|e| e.to_string())?; }
-    let character_profile = CharacterProfile::for_body_type(&body);
-    let asset = PetAsset { model_path: active_model_path, source_image_path: image_target.to_string_lossy().into(), body_type: body, character_profile, created_at: format!("{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs()) };
-    mutate(&app, |state| { state.lifecycle = AppLifecycle::Ready; state.pet = Some(config.clone()); state.asset = Some(asset); state.generation = models::GenerationState { message: "Ready".into(), ..Default::default() }; state.visible = true; })?;
-    set_autostart(&app, config.launch_on_startup)?;
-    apply_overlay(&app, &config.overlay_mode);
+    if is_new {
+        let id = uuid::Uuid::new_v4().to_string();
+        let active = app_data_dir(&app)?.join("pets").join(&id); fs::create_dir_all(&active).map_err(|e| e.to_string())?;
+        let active_model_path = if let Some(source_model) = candidate {
+            if !std::path::Path::new(&source_model).is_file() { return Err("The generated model file is missing or corrupt.".into()); }
+            let model_target = active.join("pet.glb");
+            fs::copy(&source_model, &model_target).map_err(|e| e.to_string())?;
+            Some(model_target.to_string_lossy().into())
+        } else { None };
+        let source_image = source.ok_or("The source image is missing")?;
+        let source_ext = std::path::Path::new(&source_image).extension().and_then(|s| s.to_str()).unwrap_or("png");
+        let image_target = active.join(format!("source.{source_ext}"));
+        fs::copy(source_image, &image_target).map_err(|e| e.to_string())?;
+        let asset = PetAsset { model_path: active_model_path, source_image_path: image_target.to_string_lossy().into(), body_type: body.clone(), character_profile: CharacterProfile::for_body_type(&body), created_at: format!("{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs()) };
+        mutate(&app, |state| {
+            state.pets.push(PetRecord { id: id.clone(), config: config.clone(), asset, paused: false, visible: true });
+            state.selected_pet_id = Some(id.clone());
+            state.generation = models::GenerationState { message: "Ready".into(), ..Default::default() };
+            sync_selected(state);
+        })?;
+    } else if let Some(id) = selected_id {
+        mutate(&app, |state| {
+            if let Some(pet) = state.pets.iter_mut().find(|pet| pet.id == id) { pet.config = config.clone(); }
+            sync_selected(state);
+        })?;
+    }
+    let autostart = app.state::<RuntimeState>().inner.lock().map_err(|_| "State unavailable")?.pets.iter().any(|pet| pet.config.launch_on_startup);
+    set_autostart(&app, autostart)?;
+    sync_pet_windows(&app)?;
     sync_chat_widget(&app, &config.chat_mode, true);
     if let Some(setup) = app.get_webview_window("setup") { let _ = setup.hide(); }
-    if let Some(pet) = app.get_webview_window("pet") { let _ = pet.show(); }
-    let _ = app.emit_to("pet", "pet-updated", ());
+    emit_pet_updates(&app);
     Ok(())
 }
 
-#[tauri::command]
-fn set_paused(app: AppHandle, paused: bool) -> Result<(), String> { mutate(&app, |s| s.paused = paused) }
+#[tauri::command(rename_all = "camelCase")]
+fn set_paused(app: AppHandle, paused: bool, pet_id: Option<String>) -> Result<(), String> {
+    mutate(&app, |state| {
+        let id = pet_id.clone().or_else(|| state.selected_pet_id.clone());
+        if let Some(pet) = state.pets.iter_mut().find(|pet| Some(&pet.id) == id.as_ref()) { pet.paused = paused; }
+        sync_selected(state);
+    })
+}
 
-#[tauri::command]
-fn set_overlay_mode(app: AppHandle, mode: OverlayMode) -> Result<(), String> {
-    apply_overlay(&app, &mode); mutate(&app, |state| if let Some(pet) = &mut state.pet { pet.overlay_mode = mode; })
+#[tauri::command(rename_all = "camelCase")]
+fn set_overlay_mode(app: AppHandle, mode: OverlayMode, pet_id: Option<String>) -> Result<(), String> {
+    mutate(&app, |state| {
+        let id = pet_id.clone().or_else(|| state.selected_pet_id.clone());
+        if let Some(pet) = state.pets.iter_mut().find(|pet| Some(&pet.id) == id.as_ref()) { pet.config.overlay_mode = mode.clone(); }
+        sync_selected(state);
+    })?;
+    sync_pet_windows(&app)
 }
 
 #[tauri::command]
 fn set_cursor_passthrough(window: WebviewWindow, ignore: bool) -> Result<(), String> { window.set_ignore_cursor_events(ignore).map_err(|e| e.to_string()) }
 
-#[tauri::command]
-fn set_launch_on_startup(app: AppHandle, enabled: bool) -> Result<(), String> {
-    set_autostart(&app, enabled)?; mutate(&app, |state| if let Some(pet) = &mut state.pet { pet.launch_on_startup = enabled; })
+#[tauri::command(rename_all = "camelCase")]
+fn set_launch_on_startup(app: AppHandle, enabled: bool, pet_id: Option<String>) -> Result<(), String> {
+    mutate(&app, |state| {
+        let id = pet_id.clone().or_else(|| state.selected_pet_id.clone());
+        if let Some(pet) = state.pets.iter_mut().find(|pet| Some(&pet.id) == id.as_ref()) { pet.config.launch_on_startup = enabled; }
+        sync_selected(state);
+    })?;
+    let any_enabled = app.state::<RuntimeState>().inner.lock().map_err(|_| "State unavailable")?.pets.iter().any(|pet| pet.config.launch_on_startup);
+    set_autostart(&app, any_enabled)
 }
 
 #[tauri::command]
@@ -164,10 +258,20 @@ fn ensure_local_model(app: AppHandle, state: State<'_, RuntimeState>) -> Result<
     tauri::async_runtime::spawn(local_ai::install_model(app)); Ok(())
 }
 
-#[tauri::command]
-async fn send_chat(app: AppHandle, message: String) -> Result<LocalAiReply, String> {
-    let reply = local_ai::chat(&app, message).await?;
-    let _ = app.emit_to("pet", "pet-chat-reply", reply.clone());
+#[tauri::command(rename_all = "camelCase")]
+async fn send_chat(app: AppHandle, message: String, pet_id: Option<String>) -> Result<LocalAiReply, String> {
+    let target_id = match pet_id {
+        Some(id) => Some(id),
+        None => app
+            .state::<RuntimeState>()
+            .inner
+            .lock()
+            .map_err(|_| "State unavailable")?
+            .selected_pet_id
+            .clone(),
+    };
+    let reply = local_ai::chat(&app, message, target_id.clone()).await?;
+    if let Some(id) = target_id { let _ = app.emit_to(pet_window_label(&id), "pet-chat-reply", reply.clone()); }
     Ok(reply)
 }
 
@@ -176,21 +280,47 @@ fn clear_conversation(app: AppHandle) -> Result<(), String> { mutate(&app, |stat
 
 #[tauri::command]
 fn delete_pet(app: AppHandle) -> Result<(), String> {
-    let active = app_data_dir(&app)?.join("active");
-    if active.is_dir() { fs::remove_dir_all(&active).map_err(|e| format!("Could not delete the pet files: {e}"))?; }
-    let _ = set_autostart(&app, false);
+    let selected = app.state::<RuntimeState>().inner.lock().map_err(|_| "State unavailable")?.selected_pet_id.clone().ok_or("No pet is selected")?;
+    let data_dir = app_data_dir(&app)?;
+    let pet_dir = data_dir.join("pets").join(&selected);
+    if pet_dir.is_dir() {
+        fs::remove_dir_all(&pet_dir).map_err(|e| format!("Could not delete the pet files: {e}"))?;
+    } else {
+        // Pets created before multi-pet support lived in the single `active` folder.
+        // Only remove that exact folder when the selected record still points into it.
+        let legacy_dir = data_dir.join("active");
+        let selected_uses_legacy_dir = app
+            .state::<RuntimeState>()
+            .inner
+            .lock()
+            .map_err(|_| "State unavailable")?
+            .pets
+            .iter()
+            .find(|pet| pet.id == selected)
+            .is_some_and(|pet| {
+                pet.asset
+                    .model_path
+                    .as_deref()
+                    .is_some_and(|path| std::path::Path::new(path).starts_with(&legacy_dir))
+                    || std::path::Path::new(&pet.asset.source_image_path).starts_with(&legacy_dir)
+            });
+        if selected_uses_legacy_dir && legacy_dir.is_dir() {
+            fs::remove_dir_all(&legacy_dir).map_err(|e| format!("Could not delete the pet files: {e}"))?;
+        }
+    }
     mutate(&app, |state| {
-        state.lifecycle = AppLifecycle::NeedsSetup;
-        state.pet = None;
-        state.asset = None;
+        state.pets.retain(|pet| pet.id != selected);
+        state.selected_pet_id = state.pets.first().map(|pet| pet.id.clone());
         state.generation = models::GenerationState { message: "Ready".into(), ..Default::default() };
-        state.conversation.clear();
-        state.conversation_summary.clear();
-        state.visible = false;
+        sync_selected(state);
     })?;
-    if let Some(window) = app.get_webview_window("pet") { let _ = window.hide(); }
-    if let Some(window) = app.get_webview_window("chat") { let _ = window.hide(); }
-    show_setup(&app, "welcome");
+    let any_startup = app.state::<RuntimeState>().inner.lock().map_err(|_| "State unavailable")?.pets.iter().any(|pet| pet.config.launch_on_startup);
+    let _ = set_autostart(&app, any_startup);
+    sync_pet_windows(&app)?;
+    if app.state::<RuntimeState>().inner.lock().map_err(|_| "State unavailable")?.pets.is_empty() {
+        if let Some(window) = app.get_webview_window("chat") { let _ = window.hide(); }
+        show_setup(&app, "welcome");
+    } else { show_setup(&app, "edit"); }
     Ok(())
 }
 
@@ -242,9 +372,9 @@ fn tray_icon() -> Image<'static> {
 }
 
 fn build_tray(app: &tauri::App) -> tauri::Result<()> {
-    let show = MenuItem::with_id(app, "show", "Show / Hide Pet", true, None::<&str>)?;
-    let pause = MenuItem::with_id(app, "pause", "Pause / Resume Roaming", true, None::<&str>)?;
-    let top = MenuItem::with_id(app, "top", "Toggle Stay on Top", true, None::<&str>)?;
+    let show = MenuItem::with_id(app, "show", "Show / Hide All Pets", true, None::<&str>)?;
+    let pause = MenuItem::with_id(app, "pause", "Pause / Resume All Pets", true, None::<&str>)?;
+    let top = MenuItem::with_id(app, "top", "Toggle All Pets on Top", true, None::<&str>)?;
     let startup = MenuItem::with_id(app, "startup", "Toggle Launch at Startup", true, None::<&str>)?;
     let chat_mode = MenuItem::with_id(app, "chat_mode", "Toggle Pet Chat / Glass Widget", true, None::<&str>)?;
     let edit = MenuItem::with_id(app, "edit", "Open Settings", true, None::<&str>)?;
@@ -255,26 +385,26 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
     TrayIconBuilder::new().icon(tray_icon()).tooltip("Desk Pal").menu(&menu).on_menu_event(|app, event| {
         match event.id().as_ref() {
             "show" => {
-                let visible = app.state::<RuntimeState>().inner.lock().ok().map(|s| s.visible).unwrap_or(false);
-                if let Some(window) = app.get_webview_window("pet") { if visible { let _ = window.hide(); } else { let _ = window.show(); } }
-                let _ = mutate(app, |s| s.visible = !visible);
+                let any_visible = app.state::<RuntimeState>().inner.lock().ok().map(|s| s.pets.iter().any(|pet| pet.visible)).unwrap_or(false);
+                let _ = mutate(app, |state| { for pet in &mut state.pets { pet.visible = !any_visible; } sync_selected(state); });
+                let _ = sync_pet_windows(app);
             }
-            "pause" => { let paused = app.state::<RuntimeState>().inner.lock().ok().map(|s| s.paused).unwrap_or(false); let _ = mutate(app, |s| s.paused = !paused); }
+            "pause" => { let all_paused = app.state::<RuntimeState>().inner.lock().ok().map(|s| s.pets.iter().all(|pet| pet.paused)).unwrap_or(false); let _ = mutate(app, |state| { for pet in &mut state.pets { pet.paused = !all_paused; } sync_selected(state); }); emit_pet_updates(app); }
             "top" => {
-                let mode = app.state::<RuntimeState>().inner.lock().ok().and_then(|s| s.pet.as_ref().map(|p| p.overlay_mode.clone())).unwrap_or(OverlayMode::AlwaysOnTop);
-                let next = if mode == OverlayMode::AlwaysOnTop { OverlayMode::Normal } else { OverlayMode::AlwaysOnTop };
-                apply_overlay(app, &next); let _ = mutate(app, |s| if let Some(p) = &mut s.pet { p.overlay_mode = next; });
+                let all_top = app.state::<RuntimeState>().inner.lock().ok().map(|s| s.pets.iter().all(|pet| pet.config.overlay_mode == OverlayMode::AlwaysOnTop)).unwrap_or(false);
+                let next = if all_top { OverlayMode::Normal } else { OverlayMode::AlwaysOnTop };
+                let _ = mutate(app, |state| { for pet in &mut state.pets { pet.config.overlay_mode = next.clone(); } sync_selected(state); });
+                let _ = sync_pet_windows(app);
             }
             "startup" => {
-                let enabled = app.autolaunch().is_enabled().unwrap_or(false); let _ = set_autostart(app, !enabled); let _ = mutate(app, |s| if let Some(p) = &mut s.pet { p.launch_on_startup = !enabled; });
+                let enabled = app.autolaunch().is_enabled().unwrap_or(false); let _ = set_autostart(app, !enabled); let _ = mutate(app, |state| { for pet in &mut state.pets { pet.config.launch_on_startup = !enabled; } sync_selected(state); });
             }
             "chat_mode" => {
                 let current = app.state::<RuntimeState>().inner.lock().ok().and_then(|s| s.pet.as_ref().map(|p| p.chat_mode.clone())).unwrap_or_default();
                 let next = if current == ChatMode::GlassWidget { ChatMode::OnClick } else { ChatMode::GlassWidget };
-                let _ = mutate(app, |s| if let Some(p) = &mut s.pet { p.chat_mode = next.clone(); });
+                let _ = mutate(app, |state| { if let Some(id) = state.selected_pet_id.clone() { if let Some(pet) = state.pets.iter_mut().find(|pet| pet.id == id) { pet.config.chat_mode = next.clone(); } } sync_selected(state); });
                 sync_chat_widget(app, &next, true);
-                let _ = app.emit_to("pet", "pet-updated", ());
-                let _ = app.emit_to("chat", "pet-updated", ());
+                emit_pet_updates(app);
             }
             "edit" => show_setup(app, "edit"),
             "replace" => show_setup(app, "replace"),
@@ -291,27 +421,25 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _, _| {
             let ready = app.state::<RuntimeState>().inner.lock().ok().map(|s| matches!(s.lifecycle, AppLifecycle::Ready)).unwrap_or(false);
-            if ready { if let Some(window) = app.get_webview_window("pet") { let _ = window.show(); } } else { show_setup(app, "welcome"); }
+            if ready { let _ = mutate(app, |state| { for pet in &mut state.pets { pet.visible = true; } sync_selected(state); }); let _ = sync_pet_windows(app); } else { show_setup(app, "welcome"); }
         }))
         .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, Some(vec!["--background"])))
         .setup(|app| {
             let loaded = app_state::load(app.handle());
             let ready = matches!(loaded.lifecycle, AppLifecycle::Ready);
-            let autostart = loaded.pet.as_ref().map(|p| p.launch_on_startup).unwrap_or(false);
-            let overlay = loaded.pet.as_ref().map(|p| p.overlay_mode.clone()).unwrap_or(OverlayMode::AlwaysOnTop);
+            let autostart = loaded.pets.iter().any(|pet| pet.config.launch_on_startup);
             let chat_mode = loaded.pet.as_ref().map(|p| p.chat_mode.clone()).unwrap_or_default();
             app.manage(RuntimeState { inner: std::sync::Mutex::new(loaded), cancel_generation: std::sync::atomic::AtomicBool::new(false), ai: tokio::sync::Mutex::new(Default::default()) });
             build_tray(app)?;
             if autostart { let _ = app.autolaunch().enable(); } else { let _ = app.autolaunch().disable(); }
-            apply_overlay(app.handle(), &overlay);
             sync_chat_widget(app.handle(), &chat_mode, ready);
-            if ready { if let Some(window) = app.get_webview_window("pet") { window.show()?; } } else { show_setup(app.handle(), "welcome"); }
+            if ready { sync_pet_windows(app.handle()).map_err(std::io::Error::other)?; } else { show_setup(app.handle(), "welcome"); }
             Ok(())
         })
         .on_window_event(|window, event| {
             if window.label() == "setup" { if let WindowEvent::CloseRequested { api, .. } = event { api.prevent_close(); let _ = window.hide(); } }
         })
-        .invoke_handler(tauri::generate_handler![get_app_snapshot, save_widget_position, start_generation, cancel_generation, use_image_candidate, use_model_candidate, activate_pet, delete_pet, discard_pet_candidate, set_paused, set_overlay_mode, set_cursor_passthrough, set_launch_on_startup, ensure_local_model, send_chat, clear_conversation])
+        .invoke_handler(tauri::generate_handler![get_app_snapshot, get_pet_snapshot, select_pet, save_widget_position, start_generation, cancel_generation, use_image_candidate, use_model_candidate, activate_pet, delete_pet, discard_pet_candidate, set_paused, set_overlay_mode, set_cursor_passthrough, set_launch_on_startup, ensure_local_model, send_chat, clear_conversation])
         .run(tauri::generate_context!())
         .expect("error while running Desk Pal");
 }

@@ -28,20 +28,6 @@
         "resizable": true
       },
       {
-        "label": "pet",
-        "url": "index.html?view=pet",
-        "width": 380,
-        "height": 520,
-        "visible": false,
-        "transparent": true,
-        "decorations": false,
-        "resizable": false,
-        "shadow": false,
-        "skipTaskbar": true,
-        "alwaysOnTop": true,
-        "focus": false
-      },
-      {
         "label": "chat",
         "url": "index.html?view=chat",
         "width": 400,
