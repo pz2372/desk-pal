@@ -57,7 +57,16 @@ pub struct PreflightResult {
     pub summary: String,
     pub images: Vec<PreflightImage>,
     pub issues: Vec<PreflightIssue>,
+    pub anatomy: InitialAnatomyProfile,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InitialAnatomyLandmark { pub name: String, pub image_index: usize, pub x: f32, pub y: f32, pub confidence: f32, pub visible: bool, pub explanation: String }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InitialAnatomyProfile { pub family: String, pub species: String, pub has_tail: bool, pub has_wings: bool, pub confidence: f32, pub explanation: String, pub landmarks: Vec<InitialAnatomyLandmark> }
 
 fn stage(value: &str) -> GenerationStage {
     match value { "uploading" => GenerationStage::Uploading, "generating" => GenerationStage::Generating, "rig_check" => GenerationStage::RigCheck, "analyzing" => GenerationStage::Analyzing, "needs_correction" => GenerationStage::NeedsCorrection, "rigging" => GenerationStage::Rigging, "animating" => GenerationStage::Animating, "downloading" => GenerationStage::Downloading, "completed" => GenerationStage::Completed, "cancelled" => GenerationStage::Cancelled, _ => GenerationStage::Failed }
@@ -97,8 +106,8 @@ pub async fn preflight(data_urls: Vec<String>) -> Result<PreflightResult, String
     response.json::<PreflightResult>().await.map_err(|e| format!("The image check returned invalid results: {e}"))
 }
 
-pub async fn run(app: AppHandle, generation_id: String, data_urls: Vec<String>, filenames: Vec<String>, views: Vec<PreflightImage>) {
-    if let Err(error) = run_inner(&app, &generation_id, &data_urls, &filenames, &views).await {
+pub async fn run(app: AppHandle, generation_id: String, data_urls: Vec<String>, filenames: Vec<String>, views: Vec<PreflightImage>, anatomy: InitialAnatomyProfile) {
+    if let Err(error) = run_inner(&app, &generation_id, &data_urls, &filenames, &views, &anatomy).await {
         let cancelled = app.state::<crate::app_state::RuntimeState>().cancel_generation.load(Ordering::Relaxed);
         let _ = mutate(&app, |value| {
             if value.generation.id.as_deref() == Some(&generation_id) {
@@ -111,10 +120,10 @@ pub async fn run(app: AppHandle, generation_id: String, data_urls: Vec<String>, 
     }
 }
 
-async fn run_inner(app: &AppHandle, generation_id: &str, data_urls: &[String], filenames: &[String], views: &[PreflightImage]) -> Result<(), String> {
+async fn run_inner(app: &AppHandle, generation_id: &str, data_urls: &[String], filenames: &[String], views: &[PreflightImage], anatomy: &InitialAnatomyProfile) -> Result<(), String> {
     let root = server_root();
     let client = reqwest::Client::builder().timeout(Duration::from_secs(100)).build().map_err(|e| e.to_string())?;
-    let response = client.post(format!("{root}/v1/jobs")).json(&serde_json::json!({ "dataUrls": data_urls, "filenames": filenames, "views": views })).send().await.map_err(|e| format!("Could not reach the Desk Pal generation service: {e}"))?;
+    let response = client.post(format!("{root}/v1/jobs")).json(&serde_json::json!({ "dataUrls": data_urls, "filenames": filenames, "views": views, "anatomyProfile": anatomy })).send().await.map_err(|e| format!("Could not reach the Desk Pal generation service: {e}"))?;
     if !response.status().is_success() { return Err(response_error(response).await); }
     let created = response.json::<CreatedJob>().await.map_err(|e| format!("The generation service returned an invalid job: {e}"))?;
     mutate(app, |value| { if value.generation.id.as_deref() == Some(generation_id) { value.generation.task_id = Some(created.id.clone()); value.generation.task_token = Some(created.token.clone()); } })?;

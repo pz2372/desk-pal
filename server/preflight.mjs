@@ -9,6 +9,14 @@ const ISSUE_TYPES = [
 ];
 
 const ANGLES = ["front", "front_three_quarter", "left", "right", "back", "left_three_quarter", "right_three_quarter", "unknown"];
+const RIG_FAMILIES = ["humanoid", "quadruped", "unsupported"];
+const IMAGE_LANDMARKS = [
+  "head", "chest", "pelvis", "left_shoulder", "right_shoulder", "left_elbow", "right_elbow", "left_hand", "right_hand",
+  "left_hip", "right_hip", "left_knee", "right_knee", "left_foot", "right_foot",
+  "front_left_shoulder", "front_right_shoulder", "front_left_elbow", "front_right_elbow", "front_left_paw", "front_right_paw",
+  "back_left_hip", "back_right_hip", "back_left_knee", "back_right_knee", "back_left_paw", "back_right_paw",
+  "tail_base", "tail_tip", "left_wing_tip", "right_wing_tip",
+];
 
 export const PREFLIGHT_SCHEMA = {
   type: "object",
@@ -42,8 +50,27 @@ export const PREFLIGHT_SCHEMA = {
         required: ["type", "imageIndexes", "explanation", "suggestion"],
       },
     },
+    anatomy: {
+      type: "object", additionalProperties: false,
+      properties: {
+        family: { type: "string", enum: RIG_FAMILIES }, species: { type: "string" },
+        hasTail: { type: "boolean" }, hasWings: { type: "boolean" }, confidence: { type: "number", minimum: 0, maximum: 1 }, explanation: { type: "string" },
+        landmarks: {
+          type: "array",
+          items: {
+            type: "object", additionalProperties: false,
+            properties: {
+              name: { type: "string", enum: IMAGE_LANDMARKS }, imageIndex: { type: "integer", minimum: 0, maximum: 2 },
+              x: { type: "number", minimum: 0, maximum: 1 }, y: { type: "number", minimum: 0, maximum: 1 },
+              confidence: { type: "number", minimum: 0, maximum: 1 }, visible: { type: "boolean" }, explanation: { type: "string" },
+            },
+            required: ["name", "imageIndex", "x", "y", "confidence", "visible", "explanation"],
+          },
+        },
+      }, required: ["family", "species", "hasTail", "hasWings", "confidence", "explanation", "landmarks"],
+    },
   },
-  required: ["summary", "images", "issues"],
+  required: ["summary", "images", "issues", "anatomy"],
 };
 
 const SYSTEM_PROMPT = `You are the image-quality gate for Desk Pal, an image-to-3D pet application. Inspect every supplied image carefully. The user may provide one to three views of the same character.
@@ -57,7 +84,9 @@ Report an issue only when it is reasonably evident. Check for exactly these fail
 6. Background objects, props, shadows, or other characters that could be mistaken for body parts.
 7. Limbs that remain hidden, fused, crossed, or occluded in every supplied image.
 
-Image 1 should be a front or three-quarter-front full-body view. Extra images should add a side and back/opposite-three-quarter view. All views must show the same character. Do not reject an intentional stylized design merely because it is unusual. Do not claim a body part is missing unless the other visual evidence indicates the character should have it. Explain each problem in plain language and give one concrete replacement-image instruction. Return no issues when the images are suitable for 3D generation and rigging.`;
+Image 1 should be a front or three-quarter-front full-body view. Extra images should add a side and back/opposite-three-quarter view. All views must show the same character. Do not reject an intentional stylized design merely because it is unusual. Do not claim a body part is missing unless the other visual evidence indicates the character should have it. Explain each problem in plain language and give one concrete replacement-image instruction. Return no issues when the images are suitable for 3D generation and rigging.
+
+Also create the initial anatomy plan before any 3D or Blender work. Classify an upright two-leg/two-arm creature as humanoid and a four-load-bearing-limb creature as quadruped. Use unsupported only when neither template fits. Detect only anatomy actually shown; never add wings or a tail because a known species usually has them. Use the character's anatomical left and right. Return the same canonical landmarks used for rigging, with coordinates on the clearest ORIGINAL image (x left-to-right, y top-to-bottom, normalized 0..1). Include all expected landmarks once, infer occluded joints using symmetry with lower confidence, and set hasTail/hasWings from visible evidence.`;
 
 function outputText(response) {
   for (const item of response?.output || []) {
@@ -72,7 +101,7 @@ function outputText(response) {
 }
 
 export function validatePreflightResult(value, imageCount) {
-  if (!value || !Array.isArray(value.images) || !Array.isArray(value.issues)) throw new Error("The image quality result was malformed.");
+  if (!value || !Array.isArray(value.images) || !Array.isArray(value.issues) || !value.anatomy) throw new Error("The image quality result was malformed.");
   const reportedIndexes = value.images.map((image) => image?.index).filter(Number.isInteger);
   // GPT sees user-facing labels such as "Image 1" and may return one-based
   // indexes despite the schema. Accept both forms instead of blocking creation.
@@ -96,7 +125,23 @@ export function validatePreflightResult(value, imageCount) {
       explanation: String(issue.explanation || "This image may not produce a reliable 3D pet."),
       suggestion: String(issue.suggestion || "Upload a clearer full-body view."),
     }));
-  return { passed: issues.length === 0, summary: String(value.summary || (issues.length ? "Please replace the highlighted images." : "Images are ready.")), images: images.sort((a, b) => a.index - b.index), issues };
+  const anatomy = validateInitialAnatomy(value.anatomy, imageCount);
+  return { passed: issues.length === 0, summary: String(value.summary || (issues.length ? "Please replace the highlighted images." : "Images are ready.")), images: images.sort((a, b) => a.index - b.index), issues, anatomy };
+}
+
+export function validateInitialAnatomy(value, imageCount = 3) {
+  if (!value || !RIG_FAMILIES.includes(value.family) || !Array.isArray(value.landmarks)) throw new Error("The initial anatomy profile was malformed.");
+  const seen = new Set();
+  const landmarks = value.landmarks.filter((point) => {
+    if (!IMAGE_LANDMARKS.includes(point?.name) || seen.has(point.name)) return false;
+    seen.add(point.name);
+    return [point.imageIndex, point.x, point.y, point.confidence].every(Number.isFinite);
+  }).map((point) => ({
+    name: point.name, imageIndex: Math.max(0, Math.min(imageCount - 1, Math.trunc(point.imageIndex))),
+    x: Math.max(0, Math.min(1, point.x)), y: Math.max(0, Math.min(1, point.y)), confidence: Math.max(0, Math.min(1, point.confidence)),
+    visible: Boolean(point.visible), explanation: String(point.explanation || ""),
+  }));
+  return { family: value.family, species: String(value.species || "unknown creature"), hasTail: Boolean(value.hasTail), hasWings: Boolean(value.hasWings), confidence: Math.max(0, Math.min(1, Number(value.confidence) || 0)), explanation: String(value.explanation || ""), landmarks };
 }
 
 export async function analyzeImagePreflight(dataUrls, options = {}) {

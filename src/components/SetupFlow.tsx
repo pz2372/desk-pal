@@ -109,7 +109,7 @@ export function SetupFlow() {
       const preflight = await preflightImages(dataUrls);
       if (!preflight.passed) { setPreflightIssues(preflight.issues); return; }
       setPreflightIssues([]);
-      await startGeneration(dataUrls, selectedFiles.map((file) => file.name), preflight.images);
+      await startGeneration(dataUrls, selectedFiles.map((file) => file.name), preflight.images, preflight.anatomy);
       setSnapshot(await getSnapshot());
       setStep(2);
     } catch (e) { setError(String(e)); } finally { setBusy(false); }

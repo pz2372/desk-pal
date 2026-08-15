@@ -4,7 +4,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { extname, join } from "node:path";
 import { spawn } from "node:child_process";
 import { createRigAnalysis, familyForBodyType, mergeSmartRigAnalysis, validateBlenderGuide, validateRigCorrections } from "./rigging.mjs";
-import { analyzeImagePreflight } from "./preflight.mjs";
+import { analyzeImagePreflight, validateInitialAnatomy } from "./preflight.mjs";
 import { analyzeModelAnatomy } from "./anatomy.mjs";
 
 const PORT = Number(process.env.PORT || 8787);
@@ -179,9 +179,9 @@ async function runBlenderRig(job, automatic = false) {
   update(job, "completed", 100, automatic ? "Your GPT-guided Blender rig is ready." : "Your corrected Blender rig is ready.");
 }
 
-async function smartRigFallback(job, images, suggestedBodyType, fallbackMessage) {
-  const fallbackFamily = familyForBodyType(suggestedBodyType) || "humanoid";
-  job.rigAnalysis = createRigAnalysis(fallbackFamily === "quadruped" ? "quadruped" : "biped", false);
+async function smartRigFallback(job, images, suggestedBodyType, fallbackMessage, initialProfile = job.initialAnatomy) {
+  const fallbackFamily = ["humanoid", "quadruped"].includes(initialProfile?.family) ? initialProfile.family : familyForBodyType(suggestedBodyType) || "humanoid";
+  job.rigAnalysis = createRigAnalysis(fallbackFamily === "quadruped" ? "quadruped" : "biped", false, { family: fallbackFamily, hasTail: initialProfile?.hasTail, hasWings: initialProfile?.hasWings });
   if (!process.env.OPENAI_API_KEY) { update(job, "needs_correction", 62, fallbackMessage); return; }
   try {
     update(job, "analyzing", 62, "GPT is finding anatomical landmarks on the finished 3D model…");
@@ -195,7 +195,7 @@ async function smartRigFallback(job, images, suggestedBodyType, fallbackMessage)
     job.analysisStep = "requesting_gpt_landmarks";
     const anatomy = await analyzeModelAnatomy(images.map((image) => `data:${image.mime};base64,${image.data.toString("base64")}`), renders, {
       bounds: cameras.bounds, dimensions: cameras.dimensions, meshCount: cameras.meshCount, vertexCount: cameras.vertexCount,
-    });
+    }, { initialProfile });
     if (anatomy.family === "unsupported") throw new Error("GPT could not map this creature to the current humanoid or quadruped rigs.");
     const anatomyPath = join(job.directory, "anatomy-analysis.json");
     const projectionPath = join(job.directory, "projected-landmarks.json");
@@ -239,7 +239,7 @@ function multiviewFiles(uploadedViews) {
   return files;
 }
 
-async function generate(job, images, filenames, classifiedViews) {
+async function generate(job, images, filenames, classifiedViews, initialProfile) {
   try {
     update(job, "uploading", 3, "Checking generation capacity…");
     await requireGenerationCapacity(job);
@@ -273,7 +273,7 @@ async function generate(job, images, filenames, classifiedViews) {
     // With GPT configured, the completed GLB is always analyzed and rigged in
     // Blender. The provider rigging path below is retained as a no-GPT fallback.
     if (process.env.OPENAI_API_KEY) {
-      await smartRigFallback(job, images, "biped", "Please help locate this character’s body parts.");
+      await smartRigFallback(job, images, "biped", "Please help locate this character’s body parts.", initialProfile);
       return;
     }
 
@@ -284,7 +284,7 @@ async function generate(job, images, filenames, classifiedViews) {
       checked = await waitTask(job, checkId, 54, 62);
     } catch (error) {
       job.bodyType = "biped";
-      await smartRigFallback(job, images, job.bodyType, "The automatic body check needs a few corrected points.");
+      await smartRigFallback(job, images, job.bodyType, "The automatic body check needs a few corrected points.", initialProfile);
       return;
     }
     job.bodyType = checked.output?.rig_type || checked.rig_type || "biped";
@@ -293,7 +293,7 @@ async function generate(job, images, filenames, classifiedViews) {
     if (guidedFamily) job.rigAnalysis = createRigAnalysis(job.bodyType, riggable);
     if (!riggable) {
       if (!guidedFamily) throw new Error("Guided fallback rigging currently supports humanoids and quadrupeds. You can still use the generated static 3D model.");
-      await smartRigFallback(job, images, job.bodyType, "We need a little help locating this character’s body parts.");
+      await smartRigFallback(job, images, job.bodyType, "We need a little help locating this character’s body parts.", initialProfile);
       return;
     }
 
@@ -304,7 +304,7 @@ async function generate(job, images, filenames, classifiedViews) {
     } catch (error) {
       if (!guidedFamily) throw error;
       job.error = error instanceof Error ? error.message : String(error);
-      await smartRigFallback(job, images, job.bodyType, "The automatic rig needs a few corrected body points.");
+      await smartRigFallback(job, images, job.bodyType, "The automatic rig needs a few corrected body points.", initialProfile);
       return;
     }
 
@@ -368,9 +368,10 @@ async function handler(request, response) {
         return `${originalName.replace(/\.[^.]+$/, "")}.${image.ext}`;
       });
       const classifiedViews = Array.isArray(payload.views) ? payload.views : [{ index: 0, angle: "front" }];
+      const initialAnatomy = payload.anatomyProfile ? validateInitialAnatomy(payload.anatomyProfile, images.length) : { family: "unsupported", species: "unknown creature", hasTail: false, hasWings: false, confidence: 0, explanation: "No image-only anatomy profile was supplied by this client.", landmarks: [] };
       const id = randomUUID(); const token = randomBytes(24).toString("hex");
-      const job = { id, token, stage: "uploading", progress: 2, message: "Preparing your images…", createdAt: Date.now(), directory: join(DATA_ROOT, id), cancelled: false };
-      jobs.set(id, job); generate(job, images, filenames, classifiedViews);
+      const job = { id, token, stage: "uploading", progress: 2, message: "Preparing your images…", createdAt: Date.now(), directory: join(DATA_ROOT, id), cancelled: false, initialAnatomy };
+      jobs.set(id, job); generate(job, images, filenames, classifiedViews, initialAnatomy);
       return send(response, 202, { id, token });
     } catch (error) { return send(response, 400, { error: error instanceof Error ? error.message : String(error) }); }
   }
@@ -386,8 +387,9 @@ async function handler(request, response) {
       const id = randomUUID(); const token = randomBytes(24).toString("hex");
       const directory = join(DATA_ROOT, id); const baseModelPath = join(directory, "base.glb");
       await mkdir(directory, { recursive: true }); await writeFile(baseModelPath, model);
-      const job = { id, token, stage: "analyzing", progress: 60, message: "Preparing the existing model for smart rigging…", createdAt: Date.now(), directory, baseModelPath, cancelled: false };
-      jobs.set(id, job); smartRigFallback(job, images, "biped", "Please help locate this character’s body parts.");
+      const initialAnatomy = payload.anatomyProfile ? validateInitialAnatomy(payload.anatomyProfile, images.length) : undefined;
+      const job = { id, token, stage: "analyzing", progress: 60, message: "Preparing the existing model for smart rigging…", createdAt: Date.now(), directory, baseModelPath, cancelled: false, initialAnatomy };
+      jobs.set(id, job); smartRigFallback(job, images, "biped", "Please help locate this character’s body parts.", initialAnatomy);
       return send(response, 202, { id, token });
     } catch (error) { return send(response, 400, { error: error instanceof Error ? error.message : String(error) }); }
   }

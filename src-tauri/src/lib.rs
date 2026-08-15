@@ -123,7 +123,7 @@ async fn preflight_images(data_urls: Vec<String>) -> Result<tripo::PreflightResu
 }
 
 #[tauri::command(rename_all = "camelCase")]
-fn start_generation(app: AppHandle, state: State<'_, RuntimeState>, data_urls: Vec<String>, filenames: Vec<String>, views: Vec<tripo::PreflightImage>) -> Result<String, String> {
+fn start_generation(app: AppHandle, state: State<'_, RuntimeState>, data_urls: Vec<String>, filenames: Vec<String>, views: Vec<tripo::PreflightImage>, anatomy: tripo::InitialAnatomyProfile) -> Result<String, String> {
     if data_urls.is_empty() || data_urls.len() > 3 || data_urls.len() != filenames.len() { return Err("Choose between one and three valid images.".into()); }
     if data_urls.iter().map(String::len).sum::<usize>() > 84_000_000 { return Err("The selected images are too large together.".into()); }
     let safe_names: Vec<String> = filenames.iter().map(|filename| filename.chars().filter(|c| c.is_ascii_alphanumeric() || ['.', '-', '_'].contains(c)).take(100).collect()).collect();
@@ -149,7 +149,7 @@ fn start_generation(app: AppHandle, state: State<'_, RuntimeState>, data_urls: V
     })?;
     let task_app = app.clone();
     let task_id = id.clone();
-    tauri::async_runtime::spawn(async move { tripo::run(task_app, task_id, data_urls, safe_names, views).await; });
+    tauri::async_runtime::spawn(async move { tripo::run(task_app, task_id, data_urls, safe_names, views, anatomy).await; });
     Ok(id)
 }
 

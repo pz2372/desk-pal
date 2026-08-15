@@ -26,11 +26,22 @@ export interface PreflightIssue {
   suggestion: string;
 }
 
+export interface InitialAnatomyProfile {
+  family: RigFamily;
+  species: string;
+  hasTail: boolean;
+  hasWings: boolean;
+  confidence: number;
+  explanation: string;
+  landmarks: Array<{ name: string; imageIndex: number; x: number; y: number; confidence: number; visible: boolean; explanation: string }>;
+}
+
 export interface PreflightResult {
   passed: boolean;
   summary: string;
   images: PreflightImage[];
   issues: PreflightIssue[];
+  anatomy: InitialAnatomyProfile;
 }
 
 export interface RigLandmark {

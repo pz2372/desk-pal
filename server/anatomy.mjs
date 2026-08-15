@@ -28,6 +28,7 @@ export const ANATOMY_PROMPT = `You are the anatomical planning stage of an autom
 
 INPUT CONTRACT
 - Original character images appear first. Use them to understand identity, anatomy, and appendages.
+- An image-only anatomy profile created before 3D generation is provided as a prior. Verify it against the GLB rather than discarding it.
 - Six neutral orthographic renders of the completed GLB follow, each explicitly labeled front, front_left, left, back, right, or front_right.
 - Original images are semantic references only. Every returned x/y coordinate MUST refer to one labeled GLB render.
 
@@ -76,7 +77,7 @@ export async function analyzeModelAnatomy(originalImages, renders, geometry, opt
   if (!Array.isArray(renders) || renders.length !== VIEWS.length || VIEWS.some((name) => !renders.some((render) => render?.name === name && typeof render?.dataUrl === "string"))) throw new Error("GPT anatomy analysis requires all six labeled GLB renders.");
   const apiKey = options.apiKey || process.env.OPENAI_API_KEY;
   if (!apiKey) throw new Error("GPT anatomy analysis is not configured.");
-  const content = [{ type: "input_text", text: `Geometry summary: ${JSON.stringify(geometry)}\nThe original images come first, followed by six labeled GLB renders. Place all coordinates on the GLB renders only.` }];
+  const content = [{ type: "input_text", text: `Initial image-only anatomy profile: ${JSON.stringify(options.initialProfile || null)}\nGeometry summary: ${JSON.stringify(geometry)}\nThe original images come first, followed by six labeled GLB renders. Preserve accurate body-family and appendage findings from the initial profile, but correct them when the actual GLB clearly differs. Place all coordinates on the GLB renders only.` }];
   originalImages.forEach((imageUrl, index) => { content.push({ type: "input_text", text: `Original reference ${index + 1}:` }, { type: "input_image", image_url: imageUrl, detail: "high" }); });
   renders.forEach((render) => { content.push({ type: "input_text", text: `GLB render view=${render.name}:` }, { type: "input_image", image_url: render.dataUrl, detail: "high" }); });
   let response;
