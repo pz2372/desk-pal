@@ -4,7 +4,7 @@ FROM node:22-bookworm-slim
 # importer imports it at runtime. Without it every Tripo GLB fails before the
 # six anatomy renders can be created.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends blender ca-certificates python3-numpy \
+    && apt-get install -y --no-install-recommends blender ca-certificates libegl1 python3-numpy \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
