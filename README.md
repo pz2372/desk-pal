@@ -1,6 +1,6 @@
 # Desk Pal
 
-A Tauri 2 prototype that turns full-body character images into animated 3D desktop companions using Tripo, then gives them private local chat and emotions. Users can create multiple pets; every visible pet gets its own transparent roaming desktop window, while the settings sidebar selects which pet to edit.
+A Tauri 2 prototype that turns full-body character images into animated 3D desktop companions using Tripo, then gives them private local chat and emotions. Users can keep multiple pets in their library and choose one active pet from the settings sidebar to roam the desktop.
 
 ## Development
 

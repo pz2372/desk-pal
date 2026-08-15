@@ -26,19 +26,27 @@ fn emit_pet_updates(app: &AppHandle) {
 }
 
 fn sync_pet_windows(app: &AppHandle) -> Result<(), String> {
-    let pets = app.state::<RuntimeState>().inner.lock().map_err(|_| "State unavailable")?.pets.clone();
-    let wanted: Vec<String> = pets.iter().map(|pet| pet_window_label(&pet.id)).collect();
+    let active_pet = {
+        let state = app.state::<RuntimeState>();
+        let value = state.inner.lock().map_err(|_| "State unavailable")?;
+        value
+            .selected_pet_id
+            .as_ref()
+            .and_then(|id| value.pets.iter().find(|pet| &pet.id == id))
+            .cloned()
+    };
+    let wanted = active_pet.as_ref().map(|pet| pet_window_label(&pet.id));
     for (label, window) in app.webview_windows() {
-        if label.starts_with("pet-") && !wanted.contains(&label) { let _ = window.close(); }
+        if label.starts_with("pet-") && wanted.as_ref() != Some(&label) { let _ = window.close(); }
     }
-    for (index, pet) in pets.iter().enumerate() {
+    if let Some(pet) = active_pet {
         let label = pet_window_label(&pet.id);
         if let Some(window) = app.get_webview_window(&label) {
             let _ = window.set_always_on_top(pet.config.overlay_mode == OverlayMode::AlwaysOnTop);
             if pet.visible { let _ = window.show(); } else { let _ = window.hide(); }
-            continue;
+            return Ok(());
         }
-        let url = WebviewUrl::App(format!("index.html?view=pet&petId={}&slot={index}", pet.id).into());
+        let url = WebviewUrl::App(format!("index.html?view=pet&petId={}", pet.id).into());
         WebviewWindowBuilder::new(app, &label, url)
             .inner_size(380.0, 520.0)
             .transparent(true)
@@ -89,13 +97,15 @@ fn get_pet_snapshot(app: AppHandle, state: State<'_, RuntimeState>, pet_id: Stri
 
 #[tauri::command(rename_all = "camelCase")]
 fn select_pet(app: AppHandle, pet_id: String) -> Result<(), String> {
+    let exists = app.state::<RuntimeState>().inner.lock().map_err(|_| "State unavailable")?.pets.iter().any(|pet| pet.id == pet_id);
+    if !exists { return Err("Pet not found".into()); }
     mutate(&app, |state| {
-        if state.pets.iter().any(|pet| pet.id == pet_id) {
-            state.selected_pet_id = Some(pet_id.clone());
-            sync_selected(state);
-        }
+        state.selected_pet_id = Some(pet_id.clone());
+        if let Some(pet) = state.pets.iter_mut().find(|pet| pet.id == pet_id) { pet.visible = true; }
+        sync_selected(state);
     })?;
     let mode = app.state::<RuntimeState>().inner.lock().map_err(|_| "State unavailable")?.pet.as_ref().map(|pet| pet.chat_mode.clone()).unwrap_or_default();
+    sync_pet_windows(&app)?;
     sync_chat_widget(&app, &mode, true);
     emit_pet_updates(&app);
     Ok(())
@@ -311,6 +321,9 @@ fn delete_pet(app: AppHandle) -> Result<(), String> {
     mutate(&app, |state| {
         state.pets.retain(|pet| pet.id != selected);
         state.selected_pet_id = state.pets.first().map(|pet| pet.id.clone());
+        if let Some(id) = state.selected_pet_id.clone() {
+            if let Some(pet) = state.pets.iter_mut().find(|pet| pet.id == id) { pet.visible = true; }
+        }
         state.generation = models::GenerationState { message: "Ready".into(), ..Default::default() };
         sync_selected(state);
     })?;
@@ -372,9 +385,9 @@ fn tray_icon() -> Image<'static> {
 }
 
 fn build_tray(app: &tauri::App) -> tauri::Result<()> {
-    let show = MenuItem::with_id(app, "show", "Show / Hide All Pets", true, None::<&str>)?;
-    let pause = MenuItem::with_id(app, "pause", "Pause / Resume All Pets", true, None::<&str>)?;
-    let top = MenuItem::with_id(app, "top", "Toggle All Pets on Top", true, None::<&str>)?;
+    let show = MenuItem::with_id(app, "show", "Show / Hide Active Pet", true, None::<&str>)?;
+    let pause = MenuItem::with_id(app, "pause", "Pause / Resume Active Pet", true, None::<&str>)?;
+    let top = MenuItem::with_id(app, "top", "Toggle Active Pet on Top", true, None::<&str>)?;
     let startup = MenuItem::with_id(app, "startup", "Toggle Launch at Startup", true, None::<&str>)?;
     let chat_mode = MenuItem::with_id(app, "chat_mode", "Toggle Pet Chat / Glass Widget", true, None::<&str>)?;
     let edit = MenuItem::with_id(app, "edit", "Open Settings", true, None::<&str>)?;
@@ -385,15 +398,15 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
     TrayIconBuilder::new().icon(tray_icon()).tooltip("Desk Pal").menu(&menu).on_menu_event(|app, event| {
         match event.id().as_ref() {
             "show" => {
-                let any_visible = app.state::<RuntimeState>().inner.lock().ok().map(|s| s.pets.iter().any(|pet| pet.visible)).unwrap_or(false);
-                let _ = mutate(app, |state| { for pet in &mut state.pets { pet.visible = !any_visible; } sync_selected(state); });
+                let visible = app.state::<RuntimeState>().inner.lock().ok().map(|s| s.visible).unwrap_or(false);
+                let _ = mutate(app, |state| { if let Some(id) = state.selected_pet_id.clone() { if let Some(pet) = state.pets.iter_mut().find(|pet| pet.id == id) { pet.visible = !visible; } } sync_selected(state); });
                 let _ = sync_pet_windows(app);
             }
-            "pause" => { let all_paused = app.state::<RuntimeState>().inner.lock().ok().map(|s| s.pets.iter().all(|pet| pet.paused)).unwrap_or(false); let _ = mutate(app, |state| { for pet in &mut state.pets { pet.paused = !all_paused; } sync_selected(state); }); emit_pet_updates(app); }
+            "pause" => { let paused = app.state::<RuntimeState>().inner.lock().ok().map(|s| s.paused).unwrap_or(false); let _ = mutate(app, |state| { if let Some(id) = state.selected_pet_id.clone() { if let Some(pet) = state.pets.iter_mut().find(|pet| pet.id == id) { pet.paused = !paused; } } sync_selected(state); }); emit_pet_updates(app); }
             "top" => {
-                let all_top = app.state::<RuntimeState>().inner.lock().ok().map(|s| s.pets.iter().all(|pet| pet.config.overlay_mode == OverlayMode::AlwaysOnTop)).unwrap_or(false);
-                let next = if all_top { OverlayMode::Normal } else { OverlayMode::AlwaysOnTop };
-                let _ = mutate(app, |state| { for pet in &mut state.pets { pet.config.overlay_mode = next.clone(); } sync_selected(state); });
+                let is_top = app.state::<RuntimeState>().inner.lock().ok().and_then(|s| s.pet.as_ref().map(|pet| pet.overlay_mode == OverlayMode::AlwaysOnTop)).unwrap_or(false);
+                let next = if is_top { OverlayMode::Normal } else { OverlayMode::AlwaysOnTop };
+                let _ = mutate(app, |state| { if let Some(id) = state.selected_pet_id.clone() { if let Some(pet) = state.pets.iter_mut().find(|pet| pet.id == id) { pet.config.overlay_mode = next.clone(); } } sync_selected(state); });
                 let _ = sync_pet_windows(app);
             }
             "startup" => {
@@ -421,7 +434,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _, _| {
             let ready = app.state::<RuntimeState>().inner.lock().ok().map(|s| matches!(s.lifecycle, AppLifecycle::Ready)).unwrap_or(false);
-            if ready { let _ = mutate(app, |state| { for pet in &mut state.pets { pet.visible = true; } sync_selected(state); }); let _ = sync_pet_windows(app); } else { show_setup(app, "welcome"); }
+            if ready { let _ = mutate(app, |state| { if let Some(id) = state.selected_pet_id.clone() { if let Some(pet) = state.pets.iter_mut().find(|pet| pet.id == id) { pet.visible = true; } } sync_selected(state); }); let _ = sync_pet_windows(app); } else { show_setup(app, "welcome"); }
         }))
         .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, Some(vec!["--background"])))
         .setup(|app| {
