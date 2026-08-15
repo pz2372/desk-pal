@@ -55,12 +55,16 @@ def main():
     ortho_scale = max(dimensions.x, dimensions.y, dimensions.z, 0.1) * 1.32
 
     scene = bpy.context.scene
-    try:
-        scene.render.engine = "BLENDER_EEVEE_NEXT"
-    except (TypeError, ValueError):
-        scene.render.engine = "BLENDER_EEVEE"
-    scene.render.resolution_x = 640
-    scene.render.resolution_y = 640
+    # These frames are coordinate guides for GPT, not final artwork. Workbench
+    # preserves the silhouette and separated limbs while staying fast on a
+    # CPU-only Render worker, even for dense Tripo meshes.
+    scene.render.engine = "BLENDER_WORKBENCH"
+    scene.display.shading.light = "STUDIO"
+    scene.display.shading.color_type = "MATERIAL"
+    scene.display.shading.show_shadows = True
+    scene.display.shading.show_cavity = True
+    scene.render.resolution_x = 512
+    scene.render.resolution_y = 512
     scene.render.resolution_percentage = 100
     scene.render.image_settings.file_format = "PNG"
     scene.render.image_settings.color_mode = "RGBA"
