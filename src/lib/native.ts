@@ -1,5 +1,5 @@
 import { convertFileSrc, invoke, isTauri } from "@tauri-apps/api/core";
-import type { AppSnapshot, LocalAiReply, PetConfig } from "../types";
+import type { AppSnapshot, LocalAiReply, PetConfig, RigAnalysis } from "../types";
 import { EMPTY_SNAPSHOT } from "../types";
 
 const browserSnapshot: AppSnapshot = { ...EMPTY_SNAPSHOT };
@@ -21,6 +21,7 @@ export const startGeneration = (dataUrl: string, filename: string) => command<st
 export const cancelGeneration = () => command<void>("cancel_generation");
 export const useImageCandidate = () => command<void>("use_image_candidate");
 export const useModelCandidate = () => command<void>("use_model_candidate");
+export const submitRigCorrections = (analysis: RigAnalysis) => command<void>("submit_rig_corrections", { analysis });
 export const activatePet = (config: PetConfig) => command<void>("activate_pet", { config });
 export const setPaused = (paused: boolean, petId?: string) => command<void>("set_paused", { paused, petId });
 export const setOverlayMode = (mode: PetConfig["overlayMode"], petId?: string) => command<void>("set_overlay_mode", { mode, petId });

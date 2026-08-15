@@ -6,7 +6,7 @@ pub enum AppLifecycle { #[default] NeedsSetup, Generating, Ready }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
-pub enum GenerationStage { #[default] Idle, Uploading, Generating, RigCheck, Rigging, Animating, Downloading, Completed, Failed, Cancelled }
+pub enum GenerationStage { #[default] Idle, Uploading, Generating, RigCheck, NeedsCorrection, Rigging, Animating, Downloading, Completed, Failed, Cancelled }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -15,6 +15,37 @@ pub enum BodyType { Biped, Quadruped, Hexapod, Octopod, Avian, Serpentine, Aquat
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SkeletonFamily { Humanoid, Quadruped, Flying, Serpentine, Aquatic, #[default] Unsupported }
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum RigFamily { Humanoid, Quadruped, #[default] Unsupported }
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum RigStatus { Ready, NeedsCorrection, Corrected, #[default] Unavailable }
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RigLandmark {
+    pub name: String,
+    pub label: String,
+    pub position: Option<[f32; 3]>,
+    pub confidence: f32,
+    pub source: String,
+    pub required: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RigAnalysis {
+    pub template_id: String,
+    pub family: RigFamily,
+    pub status: RigStatus,
+    pub confidence: f32,
+    pub anatomy: Anatomy,
+    pub capabilities: Vec<String>,
+    pub landmarks: Vec<RigLandmark>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -84,6 +115,8 @@ pub struct PetAsset {
     pub body_type: BodyType,
     #[serde(default)]
     pub character_profile: CharacterProfile,
+    #[serde(default)]
+    pub rig_analysis: Option<RigAnalysis>,
     pub created_at: String,
 }
 
@@ -110,9 +143,11 @@ pub struct GenerationState {
     pub message: String,
     pub error: Option<String>,
     pub task_id: Option<String>,
+    pub task_token: Option<String>,
     pub candidate_model_path: Option<String>,
     pub candidate_source_path: Option<String>,
     pub body_type: Option<BodyType>,
+    pub rig_analysis: Option<RigAnalysis>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

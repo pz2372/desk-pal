@@ -2,6 +2,8 @@ import { createServer } from "node:http";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { randomBytes, randomUUID } from "node:crypto";
 import { extname, join } from "node:path";
+import { spawn } from "node:child_process";
+import { createRigAnalysis, validateRigCorrections } from "./rigging.mjs";
 
 const PORT = Number(process.env.PORT || 8787);
 const HOST = process.env.HOST || (process.env.RENDER ? "0.0.0.0" : "127.0.0.1");
@@ -12,6 +14,8 @@ const jobs = new Map();
 const rateBuckets = new Map();
 const MAX_BODY = 28 * 1024 * 1024;
 const REQUIRED_PIPELINE_CREDITS = 105;
+const BLENDER_BIN = process.env.BLENDER_BIN || "blender";
+const RIG_SCRIPT = new URL("./blender/rig_pet.py", import.meta.url).pathname;
 
 function send(response, status, payload, headers = {}) {
   const body = Buffer.from(JSON.stringify(payload));
@@ -20,7 +24,7 @@ function send(response, status, payload, headers = {}) {
 }
 
 function publicJob(job) {
-  return { id: job.id, stage: job.stage, progress: job.progress, message: job.message, error: job.error, bodyType: job.bodyType, baseModelUrl: job.baseModelPath ? `/v1/jobs/${job.id}/base-model?token=${job.token}` : undefined, modelUrl: job.stage === "completed" ? `/v1/jobs/${job.id}/model?token=${job.token}` : undefined };
+  return { id: job.id, stage: job.stage, progress: job.progress, message: job.message, error: job.error, bodyType: job.bodyType, rigAnalysis: job.rigAnalysis, baseModelUrl: job.baseModelPath ? `/v1/jobs/${job.id}/base-model?token=${job.token}` : undefined, modelUrl: job.stage === "completed" ? `/v1/jobs/${job.id}/model?token=${job.token}` : undefined };
 }
 
 function allowRequest(ip) {
@@ -119,6 +123,33 @@ async function downloadGlb(url, target) {
   await writeFile(target, model);
 }
 
+async function runBlenderRig(job) {
+  if (!job.baseModelPath) throw new Error("The base model is unavailable for fallback rigging.");
+  const guidePath = join(job.directory, "rig-guide.json");
+  const outputPath = join(job.directory, "pet.glb");
+  update(job, "rigging", 70, "Blender is fitting and skinning the corrected skeleton…");
+  await new Promise((resolve, reject) => {
+    const child = spawn(BLENDER_BIN, ["--background", "--factory-startup", "--python", RIG_SCRIPT, "--", job.baseModelPath, guidePath, outputPath], { stdio: ["ignore", "pipe", "pipe"] });
+    job.blenderProcess = child;
+    let diagnostics = "";
+    const collect = (chunk) => { diagnostics = `${diagnostics}${chunk}`.slice(-12_000); };
+    child.stdout.on("data", collect); child.stderr.on("data", collect);
+    const timeout = setTimeout(() => { child.kill("SIGKILL"); reject(new Error("Blender rigging timed out.")); }, 10 * 60 * 1000);
+    child.once("error", (error) => { clearTimeout(timeout); job.blenderProcess = undefined; reject(new Error(`Blender could not start: ${error.message}`)); });
+    child.once("exit", (code) => {
+      clearTimeout(timeout);
+      job.blenderProcess = undefined;
+      if (code === 0) resolve();
+      else reject(new Error(`Blender rigging failed${diagnostics.trim() ? `: ${diagnostics.trim().split("\n").at(-1)}` : "."}`));
+    });
+  });
+  const model = await readFile(outputPath);
+  if (model.length < 20 || model.subarray(0, 4).toString() !== "glTF") throw new Error("Blender returned an invalid GLB model.");
+  job.modelPath = outputPath;
+  job.rigAnalysis = { ...job.rigAnalysis, status: "corrected", confidence: 1 };
+  update(job, "completed", 100, "Your corrected Blender rig is ready.");
+}
+
 async function generate(job, image, filename) {
   try {
     update(job, "uploading", 3, "Checking generation capacity…");
@@ -142,14 +173,37 @@ async function generate(job, image, filename) {
     job.baseModelPath = baseModelPath;
 
     update(job, "rig_check", 54, "Checking the creature’s body and limbs…");
-    const checkId = await createTask({ type: "animate_prerigcheck", original_model_task_id: generationId });
-    const checked = await waitTask(job, checkId, 54, 62);
-    if (!(checked.output?.riggable ?? checked.riggable)) throw new Error("This character could not be rigged. Try a clear, uncropped full-body image with separated limbs.");
+    let checked;
+    try {
+      const checkId = await createTask({ type: "animate_prerigcheck", original_model_task_id: generationId });
+      checked = await waitTask(job, checkId, 54, 62);
+    } catch (error) {
+      job.bodyType = "biped";
+      job.rigAnalysis = createRigAnalysis(job.bodyType, false);
+      update(job, "needs_correction", 60, "The automatic body check needs a few corrected points.");
+      return;
+    }
     job.bodyType = checked.output?.rig_type || checked.rig_type || "biped";
+    const riggable = Boolean(checked.output?.riggable ?? checked.riggable);
+    const guidedFamily = ["biped", "humanoid"].includes(job.bodyType) ? "humanoid" : job.bodyType === "quadruped" ? "quadruped" : undefined;
+    if (guidedFamily) job.rigAnalysis = createRigAnalysis(job.bodyType, riggable);
+    if (!riggable) {
+      if (!guidedFamily) throw new Error("Guided fallback rigging currently supports humanoids and quadrupeds. You can still use the generated static 3D model.");
+      update(job, "needs_correction", 62, "We need a little help locating this character’s body parts.");
+      return;
+    }
 
     update(job, "rigging", 64, "Building a skeleton for movement…");
     const rigId = await createTask({ type: "animate_rig", original_model_task_id: generationId, out_format: "glb", model_version: "v2.5-20260210", rig_type: job.bodyType, spec: "tripo" });
-    await waitTask(job, rigId, 64, 77);
+    try {
+      await waitTask(job, rigId, 64, 77);
+    } catch (error) {
+      if (!guidedFamily) throw error;
+      job.rigAnalysis = createRigAnalysis(job.bodyType, false);
+      job.error = error instanceof Error ? error.message : String(error);
+      update(job, "needs_correction", 67, "The automatic rig needs a few corrected body points.");
+      return;
+    }
 
     update(job, "animating", 78, "Teaching your pet to walk and react…");
     const animationId = await createTask({ type: "animate_retarget", original_model_task_id: rigId, out_format: "glb", animations: animations(job.bodyType), bake_animation: true, export_with_geometry: true, animate_in_place: true });
@@ -200,11 +254,27 @@ async function handler(request, response) {
       return send(response, 202, { id, token });
     } catch (error) { return send(response, 400, { error: error instanceof Error ? error.message : String(error) }); }
   }
-  const match = /^\/v1\/jobs\/([0-9a-f-]+)(?:\/(model|base-model))?$/.exec(url.pathname);
+  const match = /^\/v1\/jobs\/([0-9a-f-]+)(?:\/(model|base-model|corrections))?$/.exec(url.pathname);
   if (match) {
     const job = jobs.get(match[1]);
     if (!job || url.searchParams.get("token") !== job.token) return send(response, 404, { error: "Job not found." });
-    if (request.method === "DELETE") { job.cancelled = true; return send(response, 202, { cancelled: true }); }
+    if (request.method === "DELETE") { job.cancelled = true; job.blenderProcess?.kill("SIGKILL"); return send(response, 202, { cancelled: true }); }
+    if (request.method === "POST" && match[2] === "corrections") {
+      try {
+        const corrected = validateRigCorrections(await bodyJson(request));
+        job.rigAnalysis = corrected;
+        job.bodyType = corrected.family === "quadruped" ? "quadruped" : "biped";
+        await mkdir(job.directory, { recursive: true });
+        await writeFile(join(job.directory, "rig-guide.json"), JSON.stringify(corrected, null, 2));
+        runBlenderRig(job).catch((error) => {
+          job.stage = job.cancelled ? "cancelled" : "failed";
+          job.message = job.cancelled ? "Rigging cancelled" : "Blender could not finish this rig";
+          job.error = error instanceof Error ? error.message : String(error);
+          console.error("Fallback rigging failed", { jobId: job.id, error: job.error });
+        });
+        return send(response, 200, { rigAnalysis: corrected });
+      } catch (error) { return send(response, 400, { error: error instanceof Error ? error.message : String(error) }); }
+    }
     if (request.method === "GET" && (match[2] === "model" || match[2] === "base-model")) {
       const modelPath = match[2] === "base-model" ? job.baseModelPath : job.modelPath;
       if (!modelPath || (match[2] === "model" && job.stage !== "completed")) return send(response, 409, { error: "Model is not ready." });

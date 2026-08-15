@@ -19,3 +19,12 @@ The desktop app never asks for or stores a Tripo key. Start the generation serve
 The app downloads the official Apache-2.0 Qwen3 0.6B Q8 GGUF on demand and verifies its SHA-256. To enable model inference, package a `llama-server` binary for each release target as a Tauri sidecar named `llama-server`. Until a sidecar is present, chat safely uses the built-in scripted response engine.
 
 The creation image is sent to the configured Desk Pal generation server, which forwards it to Tripo. Pet assets, settings, and conversations are stored in the application data directory.
+
+## Guided Blender rigging
+
+Tripo remains the first automatic rigging attempt. If it cannot rig a humanoid
+or quadruped, Desk Pal opens a guided 3D landmark screen. The generation server
+then uses Blender to fit a canonical skeleton, calculate automatic skin weights,
+validate the result, and export starter idle, walk, turn, jump, and reaction
+clips. Tail and wing bones can be added to either supported family. Bird-specific
+and serpentine templates are intentionally deferred.

@@ -2,12 +2,33 @@ export type AppLifecycle = "needs_setup" | "generating" | "ready";
 export type Personality = "friendly" | "sassy" | "calm" | "chaotic";
 export type BodyType = "biped" | "quadruped" | "hexapod" | "octopod" | "avian" | "serpentine" | "aquatic" | "unknown";
 export type SkeletonFamily = "humanoid" | "quadruped" | "flying" | "serpentine" | "aquatic" | "unsupported";
+export type RigFamily = "humanoid" | "quadruped" | "unsupported";
+export type RigStatus = "ready" | "needs_correction" | "corrected" | "unavailable";
 export type PetCapability = "idle" | "walk" | "run" | "sit" | "lie" | "sleep" | "jump" | "fly" | "hover" | "land" | "take_off" | "glide" | "swim" | "wave" | "dance" | "play" | "attack" | "look_around" | "happy" | "sad" | "use_arms" | "use_tail" | "use_wings";
 export type OverlayMode = "normal" | "always_on_top";
 export type ChatMode = "on_click" | "glass_widget";
 export type Emotion = "happy" | "curious" | "calm" | "sleepy" | "surprised" | "annoyed";
 export type PetAction = "idle" | "walk" | "turn" | "jump" | "react";
-export type GenerationStage = "idle" | "uploading" | "generating" | "rig_check" | "rigging" | "animating" | "downloading" | "completed" | "failed" | "cancelled";
+export type GenerationStage = "idle" | "uploading" | "generating" | "rig_check" | "needs_correction" | "rigging" | "animating" | "downloading" | "completed" | "failed" | "cancelled";
+
+export interface RigLandmark {
+  name: string;
+  label: string;
+  position?: [number, number, number];
+  confidence: number;
+  source: "provider" | "user" | "inferred";
+  required: boolean;
+}
+
+export interface RigAnalysis {
+  templateId: string;
+  family: RigFamily;
+  status: RigStatus;
+  confidence: number;
+  anatomy: { legs: number; arms: number; wings: number; tails: number; heads: number };
+  capabilities: PetCapability[];
+  landmarks: RigLandmark[];
+}
 
 export interface PetConfig {
   name: string;
@@ -23,6 +44,7 @@ export interface PetAsset {
   sourceImagePath: string;
   bodyType: BodyType;
   characterProfile: CharacterProfile;
+  rigAnalysis?: RigAnalysis;
   createdAt: string;
 }
 
@@ -52,6 +74,7 @@ export interface GenerationState {
   candidateModelPath?: string;
   candidateSourcePath?: string;
   bodyType?: BodyType;
+  rigAnalysis?: RigAnalysis;
 }
 
 export interface AppSnapshot {

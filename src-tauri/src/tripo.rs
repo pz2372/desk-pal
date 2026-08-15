@@ -1,5 +1,5 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
-use crate::{app_state::{app_data_dir, mutate}, models::{BodyType, GenerationStage}};
+use crate::{app_state::{app_data_dir, mutate}, models::{BodyType, GenerationStage, RigAnalysis}};
 use serde::Deserialize;
 use std::{path::Path, sync::atomic::Ordering, time::Duration};
 use tauri::{AppHandle, Emitter, Manager};
@@ -25,6 +25,7 @@ struct RemoteJob {
     message: String,
     error: Option<String>,
     body_type: Option<String>,
+    rig_analysis: Option<RigAnalysis>,
     base_model_url: Option<String>,
     model_url: Option<String>,
 }
@@ -33,7 +34,7 @@ struct RemoteJob {
 struct ErrorResponse { error: Option<String> }
 
 fn stage(value: &str) -> GenerationStage {
-    match value { "uploading" => GenerationStage::Uploading, "generating" => GenerationStage::Generating, "rig_check" => GenerationStage::RigCheck, "rigging" => GenerationStage::Rigging, "animating" => GenerationStage::Animating, "downloading" => GenerationStage::Downloading, "completed" => GenerationStage::Completed, "cancelled" => GenerationStage::Cancelled, _ => GenerationStage::Failed }
+    match value { "uploading" => GenerationStage::Uploading, "generating" => GenerationStage::Generating, "rig_check" => GenerationStage::RigCheck, "needs_correction" => GenerationStage::NeedsCorrection, "rigging" => GenerationStage::Rigging, "animating" => GenerationStage::Animating, "downloading" => GenerationStage::Downloading, "completed" => GenerationStage::Completed, "cancelled" => GenerationStage::Cancelled, _ => GenerationStage::Failed }
 }
 
 fn body_type(value: &str) -> BodyType {
@@ -81,7 +82,7 @@ async fn run_inner(app: &AppHandle, generation_id: &str, data_url: &str, filenam
     let response = client.post(format!("{root}/v1/jobs")).json(&serde_json::json!({ "dataUrl": data_url, "filename": filename })).send().await.map_err(|e| format!("Could not reach the Desk Pal generation service: {e}"))?;
     if !response.status().is_success() { return Err(response_error(response).await); }
     let created = response.json::<CreatedJob>().await.map_err(|e| format!("The generation service returned an invalid job: {e}"))?;
-    mutate(app, |value| { if value.generation.id.as_deref() == Some(generation_id) { value.generation.task_id = Some(created.id.clone()); } })?;
+    mutate(app, |value| { if value.generation.id.as_deref() == Some(generation_id) { value.generation.task_id = Some(created.id.clone()); value.generation.task_token = Some(created.token.clone()); } })?;
     publish(app);
 
     loop {
@@ -110,10 +111,12 @@ async fn run_inner(app: &AppHandle, generation_id: &str, data_url: &str, filenam
                 value.generation.message = job.message.clone();
                 value.generation.error = job.error.clone();
                 if detected_body.is_some() { value.generation.body_type = detected_body.clone(); }
+                if job.rig_analysis.is_some() { value.generation.rig_analysis = job.rig_analysis.clone(); }
             }
         })?;
         publish(app);
         match current_stage {
+            GenerationStage::NeedsCorrection => return Ok(()),
             GenerationStage::Completed => {
                 let model_url = job.model_url.ok_or("The completed job did not include a model URL.")?;
                 mutate(app, |value| { value.generation.stage = GenerationStage::Downloading; value.generation.progress = 96.0; value.generation.message = "Saving your animated pet…".into(); })?;
@@ -137,6 +140,72 @@ async fn run_inner(app: &AppHandle, generation_id: &str, data_url: &str, filenam
     }
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CorrectedRig { rig_analysis: RigAnalysis }
+
+pub async fn submit_corrections(app: &AppHandle, analysis: RigAnalysis) -> Result<RigAnalysis, String> {
+    let (generation_id, task_id, token) = {
+        let state = app.state::<crate::app_state::RuntimeState>();
+        let value = state.inner.lock().map_err(|_| "State unavailable")?;
+        (value.generation.id.clone().ok_or("The local generation is missing")?, value.generation.task_id.clone().ok_or("The rigging job is missing")?, value.generation.task_token.clone().ok_or("The rigging token is missing")?)
+    };
+    let root = server_root();
+    let client = reqwest::Client::builder().timeout(Duration::from_secs(30)).build().map_err(|e| e.to_string())?;
+    let response = client
+        .post(format!("{root}/v1/jobs/{task_id}/corrections?token={token}"))
+        .json(&serde_json::json!({
+            "family": analysis.family,
+            "hasTail": analysis.anatomy.tails > 0,
+            "hasWings": analysis.anatomy.wings > 0,
+            "landmarks": analysis.landmarks,
+        }))
+        .send()
+        .await
+        .map_err(|e| format!("Could not save the rig guide: {e}"))?;
+    if !response.status().is_success() { return Err(response_error(response).await); }
+    let corrected = response.json::<CorrectedRig>().await.map(|value| value.rig_analysis).map_err(|e| format!("The rig service returned an invalid guide: {e}"))?;
+    mutate(app, |value| {
+        value.generation.rig_analysis = Some(corrected.clone());
+        value.generation.stage = GenerationStage::Rigging;
+        value.generation.progress = 70.0;
+        value.generation.message = "Blender is fitting and skinning the corrected skeleton…".into();
+        value.generation.error = None;
+    })?;
+    publish(app);
+    for _ in 0..240 {
+        if app.state::<crate::app_state::RuntimeState>().cancel_generation.load(Ordering::Relaxed) {
+            let _ = client.delete(format!("{root}/v1/jobs/{task_id}?token={token}")).send().await;
+            return Err("Rigging cancelled.".into());
+        }
+        let response = client.get(format!("{root}/v1/jobs/{task_id}?token={token}")).send().await.map_err(|e| format!("Lost connection to the Blender rig service: {e}"))?;
+        if !response.status().is_success() { return Err(response_error(response).await); }
+        let job = response.json::<RemoteJob>().await.map_err(|e| format!("The rig service returned invalid progress data: {e}"))?;
+        let current_stage = stage(&job.stage);
+        mutate(app, |value| {
+            value.generation.stage = current_stage.clone();
+            value.generation.progress = job.progress.clamp(0.0, 100.0);
+            value.generation.message = job.message.clone();
+            value.generation.error = job.error.clone();
+            if job.rig_analysis.is_some() { value.generation.rig_analysis = job.rig_analysis.clone(); }
+        })?;
+        publish(app);
+        match current_stage {
+            GenerationStage::Completed => {
+                let model_url = job.model_url.ok_or("The Blender job did not include a model URL.")?;
+                let target = app_data_dir(app)?.join("candidate").join(&generation_id).join("pet.glb");
+                download_model(&client, remote_url(&root, &model_url), &target).await?;
+                mutate(app, |value| { value.generation.candidate_model_path = Some(target.to_string_lossy().into()); })?;
+                publish(app);
+                return Ok(job.rig_analysis.unwrap_or(corrected));
+            }
+            GenerationStage::Failed | GenerationStage::Cancelled => return Err(job.error.unwrap_or(job.message)),
+            _ => tokio::time::sleep(Duration::from_secs(3)).await,
+        }
+    }
+    Err("Blender rigging timed out.".into())
+}
+
 pub(crate) fn parse_data_url(data_url: &str) -> Result<(Vec<u8>, &'static str), String> {
     let (header, payload) = data_url.split_once(',').ok_or("The image payload is invalid.")?;
     let ext = if header.starts_with("data:image/png") { "png" } else if header.starts_with("data:image/jpeg") { "jpg" } else if header.starts_with("data:image/webp") { "webp" } else { return Err("Only PNG, JPEG, and WebP images are accepted.".into()); };
@@ -150,4 +219,5 @@ mod tests {
     use super::*;
     #[test] fn accepts_supported_data_uri() { let (bytes, ext) = parse_data_url("data:image/png;base64,aGVsbG8=").unwrap(); assert_eq!(bytes, b"hello"); assert_eq!(ext, "png"); }
     #[test] fn rejects_unknown_data_uri() { assert!(parse_data_url("data:image/gif;base64,aGVsbG8=").is_err()); }
+    #[test] fn maps_manual_rigging_stage() { assert!(matches!(stage("needs_correction"), GenerationStage::NeedsCorrection)); }
 }

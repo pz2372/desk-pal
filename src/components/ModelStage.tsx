@@ -1,7 +1,8 @@
 import { ContactShadows, Environment, OrbitControls, useAnimations, useGLTF } from "@react-three/drei";
 import { Canvas, useFrame } from "@react-three/fiber";
-import { Suspense, useEffect, useRef } from "react";
+import { Suspense, useEffect, useRef, useState } from "react";
 import * as THREE from "three";
+import type { RigLandmark } from "../types";
 
 interface ModelStageProps {
   url?: string;
@@ -10,6 +11,9 @@ interface ModelStageProps {
   action?: string;
   facing?: number;
   onClick?: () => void;
+  landmarks?: RigLandmark[];
+  activeLandmark?: string;
+  onSurfacePoint?: (position: [number, number, number]) => void;
 }
 
 function ImagePet({ imageUrl, action = "idle", facing = 1, interactive, onClick }: Required<Pick<ModelStageProps, "imageUrl">> & Omit<ModelStageProps, "imageUrl">) {
@@ -20,8 +24,9 @@ function ImagePet({ imageUrl, action = "idle", facing = 1, interactive, onClick 
   </div>;
 }
 
-function GeneratedModel({ url, action = "idle", facing = 1, onClick }: Required<Pick<ModelStageProps, "url">> & Omit<ModelStageProps, "url">) {
+function GeneratedModel({ url, action = "idle", facing = 1, onClick, landmarks = [], activeLandmark, onSurfacePoint }: Required<Pick<ModelStageProps, "url">> & Omit<ModelStageProps, "url">) {
   const root = useRef<THREE.Group>(null);
+  const [markerRadius, setMarkerRadius] = useState(0.03);
   const gltf = useGLTF(url);
   const { actions, names } = useAnimations(gltf.animations, root);
 
@@ -46,6 +51,7 @@ function GeneratedModel({ url, action = "idle", facing = 1, onClick }: Required<
     const size = box.getSize(new THREE.Vector3());
     const center = box.getCenter(new THREE.Vector3());
     const scale = 2.55 / Math.max(size.y, size.x, size.z, 0.001);
+    setMarkerRadius(Math.max(size.y, size.x, size.z, 0.001) * 0.018);
     root.current.scale.setScalar(scale);
     root.current.position.set(-center.x * scale, -box.min.y * scale - 1.35, -center.z * scale);
   }, [gltf.scene]);
@@ -56,8 +62,18 @@ function GeneratedModel({ url, action = "idle", facing = 1, onClick }: Required<
     root.current.rotation.z = Math.sin(state.clock.elapsedTime * 1.1) * 0.015;
   });
 
-  return <group ref={root} rotation={[0, facing < 0 ? Math.PI : 0, 0]} onClick={(event) => { event.stopPropagation(); onClick?.(); }}>
+  return <group ref={root} rotation={[0, facing < 0 ? Math.PI : 0, 0]} onClick={(event) => {
+    event.stopPropagation();
+    if (onSurfacePoint && root.current) {
+      const point = root.current.worldToLocal(event.point.clone());
+      onSurfacePoint([point.x, point.y, point.z]);
+    } else onClick?.();
+  }}>
     <primitive object={gltf.scene.clone()} />
+    {landmarks.filter((landmark) => landmark.position).map((landmark) => <mesh key={landmark.name} position={landmark.position} raycast={() => undefined}>
+      <sphereGeometry args={[markerRadius * (landmark.name === activeLandmark ? 1.35 : 1), 18, 18]} />
+      <meshStandardMaterial color={landmark.name === activeLandmark ? "#ffffff" : "#279dff"} emissive="#087cff" emissiveIntensity={1.4} depthTest={false} />
+    </mesh>)}
   </group>;
 }
 
@@ -74,14 +90,14 @@ function PlaceholderPet({ onClick }: Pick<ModelStageProps, "onClick">) {
   </group>;
 }
 
-export function ModelStage({ url, imageUrl, interactive = false, action, facing, onClick }: ModelStageProps) {
+export function ModelStage({ url, imageUrl, interactive = false, action, facing, onClick, landmarks, activeLandmark, onSurfacePoint }: ModelStageProps) {
   if (imageUrl && !url) return <ImagePet imageUrl={imageUrl} interactive={interactive} action={action} facing={facing} onClick={onClick} />;
   return <Canvas camera={{ position: [0, 0.55, 4.5], fov: 38 }} gl={{ alpha: true, antialias: true }} dpr={[1, 1.75]} onCreated={({ gl }) => gl.setClearColor(0x000000, 0)}>
     <ambientLight intensity={1.2} />
     <directionalLight position={[3, 5, 4]} intensity={2.2} color="#9ed5ff" />
     <directionalLight position={[-3, 2, 2]} intensity={1.1} color="#187dff" />
     <Suspense fallback={null}>
-      {url ? <GeneratedModel url={url} action={action} facing={facing} onClick={onClick} /> : <PlaceholderPet onClick={onClick} />}
+      {url ? <GeneratedModel url={url} action={action} facing={facing} onClick={onClick} landmarks={landmarks} activeLandmark={activeLandmark} onSurfacePoint={onSurfacePoint} /> : <PlaceholderPet onClick={onClick} />}
       {interactive && <><Environment preset="city" /><ContactShadows position={[0, -1.38, 0]} opacity={0.35} scale={5} blur={2.4} /></>}
     </Suspense>
     {interactive && <OrbitControls makeDefault enablePan={false} minDistance={2.5} maxDistance={7} target={[0, 0.2, 0]} />}

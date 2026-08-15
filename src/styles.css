@@ -58,6 +58,24 @@ textarea { resize: none; min-height: 70px; }.text-input:focus, textarea:focus { 
 .generation-recovery .ghost-button { width: 100%; }
 .generation-failure-detail { margin: 18px 0 0; padding: 11px 13px; border: 1px solid #ff87912b; border-radius: 11px; background: #381b234d; color: #e9b5bb !important; font-size: 11px !important; line-height: 1.45 !important; text-align: left; overflow-wrap: anywhere; }
 .preview-layout { width: 100%; display: grid; grid-template-columns: 56% 44%; gap: 32px; align-items: center; }.preview-stage { height: 445px; position: relative; border-radius: 22px; overflow: hidden; background: radial-gradient(circle at 50% 50%, #102e55, #0a0e18 68%); border: 1px solid #3299ff35; box-shadow: inset 0 0 45px #087cff10; }.preview-stage > span { position: absolute; left: 0; right: 0; bottom: 13px; text-align: center; font-size: 9px; color: #73899d; pointer-events: none; }.preview-copy .ghost-button { width: 100%; }
+.rig-correction-layout { width: 100%; display: grid; grid-template-columns: minmax(0, 1.16fr) minmax(280px, .84fr); gap: 24px; align-items: center; }
+.rig-model-stage { height: 520px; position: relative; overflow: hidden; border: 1px solid #3299ff45; border-radius: 22px; background: radial-gradient(circle at 50% 45%, #113961, #080c15 70%); }
+.rig-model-stage > span { position: absolute; left: 15px; right: 15px; bottom: 12px; color: #91a8bd; font-size: 11px; text-align: center; pointer-events: none; }
+.rig-correction-copy h2 { margin: 0 0 8px; font: 600 28px Manrope, sans-serif; letter-spacing: -.035em; }
+.rig-correction-copy > p:not(.eyebrow) { margin: 0 0 14px; color: #aaa6b7; font-size: 12px; line-height: 1.5; }
+.rig-family-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.rig-family-grid button { padding: 11px; color: #dbebf8; text-align: left; border: 1px solid #ffffff22; border-radius: 11px; background: #151a27; cursor: pointer; }
+.rig-family-grid button.selected { border-color: #4ba5ff; background: #0d315f; box-shadow: inset 0 0 18px #087cff1f; }
+.rig-family-grid strong, .rig-family-grid span { display: block; }.rig-family-grid strong { font-size: 12px; }.rig-family-grid span { margin-top: 3px; color: #8f9bab; font-size: 10px; }
+.rig-feature-row { display: flex; gap: 16px; margin: 11px 0; color: #a8b6c5; font-size: 11px; }.rig-feature-row label { display: flex; align-items: center; gap: 6px; cursor: pointer; }.rig-feature-row input { accent-color: #258eff; }
+.rig-current-point { min-height: 54px; display: flex; align-items: center; gap: 11px; margin-bottom: 9px; padding: 10px 12px; color: #5eb4ff; border: 1px solid #3199ff45; border-radius: 12px; background: #087cff12; }
+.rig-current-point > svg { width: 20px; }.rig-current-point span { display: grid; gap: 2px; }.rig-current-point small { color: #7ca7cf; font-size: 9px; letter-spacing: .09em; }.rig-current-point strong { color: #eef8ff; font-size: 12px; }
+.rig-landmark-list { max-height: 185px; display: grid; gap: 5px; margin-bottom: 12px; padding-right: 3px; overflow-y: auto; }
+.rig-landmark-list button { min-height: 32px; display: flex; align-items: center; justify-content: space-between; padding: 5px 8px; color: #929dad; border: 1px solid #ffffff14; border-radius: 9px; background: #131722; cursor: pointer; }
+.rig-landmark-list button.active { color: #fff; border-color: #3fa0ff80; background: #0b315d; }.rig-landmark-list button.placed { color: #b8d8f5; }
+.rig-landmark-list button > span { display: flex; align-items: center; gap: 7px; font-size: 10px; }.rig-landmark-list svg { width: 12px; height: 12px; }
+.rig-landmark-list i { width: 24px; height: 24px; display: grid; place-items: center; color: #7e9db9; border-radius: 7px; font-style: normal; }.rig-landmark-list i:hover { color: #fff; background: #ffffff10; }
+.rig-correction-copy .primary-button { min-height: 43px; }.rig-correction-copy .ghost-button { min-height: 36px; font-size: 11px; }
 .personality-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }.personality-grid button { text-align: left; border-radius: 12px; background: #161a27e0; border: 1px solid #ffffff22; padding: 12px; cursor: pointer; }.personality-grid button.selected { border-color: #4ba5ff; background: #0d315fe8; box-shadow: inset 0 0 20px #087cff18, 0 0 14px #087cff25; }.personality-grid strong { display: block; font-size: 11px; margin-bottom: 4px; }.personality-grid span { display: block; color: #9490a1; font-size: 9px; line-height: 1.35; }
 .personality-panel { padding: 8px 0 18px; }
 .personality-panel .panel-icon { margin-bottom: 20px; }

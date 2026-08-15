@@ -4,7 +4,7 @@ mod models;
 mod tripo;
 
 use app_state::{app_data_dir, model_path, mutate, sync_selected, RuntimeState};
-use models::{AppLifecycle, AppSnapshot, CharacterProfile, ChatMode, GenerationStage, LocalAiReply, OverlayMode, PetAsset, PetConfig, PetRecord, WidgetPosition};
+use models::{AppLifecycle, AppSnapshot, CharacterProfile, ChatMode, GenerationStage, LocalAiReply, OverlayMode, PetAsset, PetConfig, PetRecord, RigAnalysis, RigFamily, SkeletonFamily, WidgetPosition};
 use std::{fs, sync::atomic::Ordering};
 use tauri::{image::Image, menu::{MenuBuilder, MenuItem}, tray::TrayIconBuilder, AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent};
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
@@ -180,18 +180,34 @@ fn use_model_candidate(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
+async fn submit_rig_corrections(app: AppHandle, analysis: RigAnalysis) -> Result<(), String> {
+    let corrected = tripo::submit_corrections(&app, analysis).await?;
+    let body_type = if corrected.family == RigFamily::Quadruped { models::BodyType::Quadruped } else { models::BodyType::Biped };
+    mutate(&app, |state| {
+        state.generation.rig_analysis = Some(corrected.clone());
+        state.generation.body_type = Some(body_type.clone());
+        state.generation.stage = GenerationStage::Completed;
+        state.generation.progress = 100.0;
+        state.generation.message = "Your Blender-rigged 3D pet is ready to preview.".into();
+        state.generation.error = None;
+    })?;
+    let _ = app.emit("generation-progress", ());
+    Ok(())
+}
+
+#[tauri::command]
 fn activate_pet(app: AppHandle, config: PetConfig) -> Result<(), String> {
     if config.name.trim().is_empty() || config.name.chars().count() > 28 { return Err("Pet names must contain 1–28 characters.".into()); }
-    let (is_new, candidate, source, body, selected_id) = {
+    let (is_new, candidate, source, body, rig_analysis, selected_id) = {
         let state = app.state::<RuntimeState>();
         let value = state.inner.lock().map_err(|_| "State unavailable")?;
         if !matches!(value.generation.stage, GenerationStage::Completed) && value.selected_pet_id.is_none() { return Err("Finish creating a pet before activating it.".into()); }
         if matches!(value.generation.stage, GenerationStage::Completed) {
-            (true, value.generation.candidate_model_path.clone(), value.generation.candidate_source_path.clone(), value.generation.body_type.clone().unwrap_or_default(), None)
+            (true, value.generation.candidate_model_path.clone(), value.generation.candidate_source_path.clone(), value.generation.body_type.clone().unwrap_or_default(), value.generation.rig_analysis.clone(), None)
         } else {
             let id = value.selected_pet_id.clone().ok_or("No pet is selected")?;
             let pet = value.pets.iter().find(|pet| pet.id == id).ok_or("No pet asset exists")?;
-            (false, pet.asset.model_path.clone(), Some(pet.asset.source_image_path.clone()), pet.asset.body_type.clone(), Some(id))
+            (false, pet.asset.model_path.clone(), Some(pet.asset.source_image_path.clone()), pet.asset.body_type.clone(), pet.asset.rig_analysis.clone(), Some(id))
         }
     };
     if is_new {
@@ -207,7 +223,14 @@ fn activate_pet(app: AppHandle, config: PetConfig) -> Result<(), String> {
         let source_ext = std::path::Path::new(&source_image).extension().and_then(|s| s.to_str()).unwrap_or("png");
         let image_target = active.join(format!("source.{source_ext}"));
         fs::copy(source_image, &image_target).map_err(|e| e.to_string())?;
-        let asset = PetAsset { model_path: active_model_path, source_image_path: image_target.to_string_lossy().into(), body_type: body.clone(), character_profile: CharacterProfile::for_body_type(&body), created_at: format!("{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs()) };
+        let mut character_profile = CharacterProfile::for_body_type(&body);
+        if let Some(rig) = &rig_analysis {
+            character_profile.skeleton_family = match rig.family { RigFamily::Humanoid => SkeletonFamily::Humanoid, RigFamily::Quadruped => SkeletonFamily::Quadruped, RigFamily::Unsupported => SkeletonFamily::Unsupported };
+            character_profile.anatomy = rig.anatomy.clone();
+            character_profile.capabilities = rig.capabilities.clone();
+            character_profile.confidence = rig.confidence;
+        }
+        let asset = PetAsset { model_path: active_model_path, source_image_path: image_target.to_string_lossy().into(), body_type: body.clone(), character_profile, rig_analysis, created_at: format!("{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs()) };
         mutate(&app, |state| {
             state.pets.push(PetRecord { id: id.clone(), config: config.clone(), asset, paused: false, visible: true });
             state.selected_pet_id = Some(id.clone());
@@ -452,7 +475,7 @@ pub fn run() {
         .on_window_event(|window, event| {
             if window.label() == "setup" { if let WindowEvent::CloseRequested { api, .. } = event { api.prevent_close(); let _ = window.hide(); } }
         })
-        .invoke_handler(tauri::generate_handler![get_app_snapshot, get_pet_snapshot, select_pet, save_widget_position, start_generation, cancel_generation, use_image_candidate, use_model_candidate, activate_pet, delete_pet, discard_pet_candidate, set_paused, set_overlay_mode, set_cursor_passthrough, set_launch_on_startup, ensure_local_model, send_chat, clear_conversation])
+        .invoke_handler(tauri::generate_handler![get_app_snapshot, get_pet_snapshot, select_pet, save_widget_position, start_generation, cancel_generation, use_image_candidate, use_model_candidate, submit_rig_corrections, activate_pet, delete_pet, discard_pet_candidate, set_paused, set_overlay_mode, set_cursor_passthrough, set_launch_on_startup, ensure_local_model, send_chat, clear_conversation])
         .run(tauri::generate_context!())
         .expect("error while running Desk Pal");
 }
