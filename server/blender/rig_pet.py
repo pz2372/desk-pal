@@ -3,9 +3,15 @@
 import bpy
 import json
 import math
+import numpy as np
 import os
 import sys
 from mathutils import Vector
+
+# Blender 3.4's bundled glTF importer still references np.bool, which NumPy
+# 1.24 removed. Keep the Debian/Render build compatible until Blender is bumped.
+if "bool" not in np.__dict__:
+    np.bool = np.bool_
 
 
 def arguments():
