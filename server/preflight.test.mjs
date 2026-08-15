@@ -19,4 +19,16 @@ describe("image preflight", () => {
     const result = await analyzeImagePreflight(["data:image/png;base64,AA==", "data:image/png;base64,AA=="], { apiKey: "test", model: "test-model", fetchImpl });
     expect(result.passed).toBe(true);
   });
+
+  it("normalizes a one-based image index", () => {
+    const result = validatePreflightResult({ summary: "Ready", images: [{ index: 1, angle: "front", description: "Front" }], issues: [] }, 1);
+    expect(result.images).toEqual([{ index: 0, angle: "front", description: "Front" }]);
+  });
+
+  it("fills a missing classification without discarding quality issues", () => {
+    const result = validatePreflightResult({ summary: "Needs another view", images: [{ index: 0, angle: "front", description: "Front" }], issues: [{ type: "hidden_limbs", imageIndexes: [0], explanation: "A hand is hidden.", suggestion: "Show both hands." }] }, 2);
+    expect(result.images).toHaveLength(2);
+    expect(result.images[1]).toMatchObject({ index: 1, angle: "unknown" });
+    expect(result.passed).toBe(false);
+  });
 });

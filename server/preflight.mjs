@@ -73,15 +73,26 @@ function outputText(response) {
 
 export function validatePreflightResult(value, imageCount) {
   if (!value || !Array.isArray(value.images) || !Array.isArray(value.issues)) throw new Error("The image quality result was malformed.");
-  const images = value.images
-    .filter((image) => Number.isInteger(image?.index) && image.index >= 0 && image.index < imageCount && ANGLES.includes(image.angle))
-    .map((image) => ({ index: image.index, angle: image.angle, description: String(image.description || "View analyzed") }));
-  if (images.length !== imageCount || new Set(images.map((image) => image.index)).size !== imageCount) throw new Error("The image quality result did not classify every image.");
+  const reportedIndexes = value.images.map((image) => image?.index).filter(Number.isInteger);
+  // GPT sees user-facing labels such as "Image 1" and may return one-based
+  // indexes despite the schema. Accept both forms instead of blocking creation.
+  const oneBased = reportedIndexes.length > 0 && !reportedIndexes.includes(0)
+    && reportedIndexes.every((index) => index >= 1 && index <= imageCount)
+    && (imageCount === 1 || reportedIndexes.includes(imageCount) || value.images.length === imageCount);
+  const imageByIndex = new Map();
+  for (const image of value.images) {
+    const index = Number(image?.index) - (oneBased ? 1 : 0);
+    if (!Number.isInteger(index) || index < 0 || index >= imageCount || !ANGLES.includes(image?.angle) || imageByIndex.has(index)) continue;
+    imageByIndex.set(index, { index, angle: image.angle, description: String(image.description || "View analyzed") });
+  }
+  const images = Array.from({ length: imageCount }, (_, index) => imageByIndex.get(index) || ({ index, angle: "unknown", description: "View received; angle was not classified" }));
   const issues = value.issues
     .filter((issue) => ISSUE_TYPES.includes(issue?.type))
     .map((issue) => ({
       type: issue.type,
-      imageIndexes: Array.isArray(issue.imageIndexes) ? issue.imageIndexes.filter((index) => Number.isInteger(index) && index >= 0 && index < imageCount) : [],
+      imageIndexes: Array.isArray(issue.imageIndexes) ? issue.imageIndexes
+        .map((index) => Number(index) - (oneBased ? 1 : 0))
+        .filter((index) => Number.isInteger(index) && index >= 0 && index < imageCount) : [],
       explanation: String(issue.explanation || "This image may not produce a reliable 3D pet."),
       suggestion: String(issue.suggestion || "Upload a clearer full-body view."),
     }));
@@ -94,7 +105,7 @@ export async function analyzeImagePreflight(dataUrls, options = {}) {
   if (!apiKey) throw new Error("The GPT image-quality check is not configured.");
   const fetchImpl = options.fetchImpl || fetch;
   const model = options.model || process.env.OPENAI_VISION_MODEL || "gpt-5.6-sol";
-  const content = [{ type: "input_text", text: `Analyze these ${dataUrls.length} numbered character image${dataUrls.length === 1 ? "" : "s"}. Return all detected problems before any paid 3D generation begins.` }];
+  const content = [{ type: "input_text", text: `Analyze these ${dataUrls.length} numbered character image${dataUrls.length === 1 ? "" : "s"}. Return one images entry for every supplied image. In the structured index fields use zero-based indexes: Image 1 is index 0, Image 2 is index 1, and Image 3 is index 2. Return all detected problems before any paid 3D generation begins.` }];
   dataUrls.forEach((imageUrl, index) => {
     content.push({ type: "input_text", text: `Image ${index + 1}:` });
     content.push({ type: "input_image", image_url: imageUrl, detail: "high" });
