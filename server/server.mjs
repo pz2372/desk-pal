@@ -3,7 +3,7 @@ import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { randomBytes, randomUUID } from "node:crypto";
 import { extname, join } from "node:path";
 import { spawn } from "node:child_process";
-import { createRigAnalysis, familyForBodyType, mergeSmartRigAnalysis, validateRigCorrections } from "./rigging.mjs";
+import { createRigAnalysis, familyForBodyType, mergeSmartRigAnalysis, validateBlenderGuide, validateRigCorrections } from "./rigging.mjs";
 import { analyzeImagePreflight } from "./preflight.mjs";
 import { analyzeModelAnatomy } from "./anatomy.mjs";
 
@@ -131,7 +131,9 @@ async function downloadGlb(url, target) {
 
 async function runBlender(job, script, args, label, timeoutMs = 10 * 60 * 1000) {
   return new Promise((resolve, reject) => {
-    const child = spawn(BLENDER_BIN, ["--background", "--factory-startup", "--python", script, "--", ...args], { stdio: ["ignore", "pipe", "pipe"] });
+    // Blender normally exits with code 0 even when a Python script raises. Make
+    // script failures observable so we never mistake a missing output for success.
+    const child = spawn(BLENDER_BIN, ["--background", "--factory-startup", "--python-exit-code", "1", "--python", script, "--", ...args], { stdio: ["ignore", "pipe", "pipe"] });
     job.blenderProcess = child;
     let diagnostics = "";
     const collect = (chunk) => { diagnostics = `${diagnostics}${chunk}`.slice(-12_000); };
@@ -141,7 +143,11 @@ async function runBlender(job, script, args, label, timeoutMs = 10 * 60 * 1000) 
     child.once("exit", (code) => {
       clearTimeout(timeout); job.blenderProcess = undefined;
       if (code === 0) resolve();
-      else reject(new Error(`${label} failed${diagnostics.trim() ? `: ${diagnostics.trim().split("\n").at(-1)}` : "."}`));
+      else {
+        const lines = diagnostics.trim().split("\n").map((line) => line.trim()).filter(Boolean);
+        const useful = lines.filter((line) => !/^Blender quit/i.test(line)).slice(-6).join(" | ");
+        reject(new Error(`${label} failed${useful ? `: ${useful}` : "."}`));
+      }
     });
   });
 }
@@ -150,9 +156,14 @@ async function runBlenderRig(job, automatic = false) {
   if (!job.baseModelPath) throw new Error("The base model is unavailable for fallback rigging.");
   const guidePath = join(job.directory, "rig-guide.json");
   const outputPath = join(job.directory, "pet.glb");
+  const guide = validateBlenderGuide(job.rigAnalysis);
+  await writeFile(guidePath, JSON.stringify(guide, null, 2));
   update(job, "rigging", 70, "Blender is fitting and skinning the corrected skeleton…");
   await runBlender(job, RIG_SCRIPT, [job.baseModelPath, guidePath, outputPath], "Blender rigging");
-  const model = await readFile(outputPath);
+  const model = await readFile(outputPath).catch((error) => {
+    if (error?.code === "ENOENT") throw new Error("Blender finished without exporting the rigged GLB. Check the Blender job diagnostics.");
+    throw error;
+  });
   if (model.length < 20 || model.subarray(0, 4).toString() !== "glTF") throw new Error("Blender returned an invalid GLB model.");
   job.modelPath = outputPath;
   job.rigAnalysis = { ...job.rigAnalysis, status: "corrected", confidence: 1 };
@@ -180,9 +191,9 @@ async function smartRigFallback(job, images, suggestedBodyType, fallbackMessage)
     await writeFile(anatomyPath, JSON.stringify(anatomy, null, 2));
     await runBlender(job, PROJECT_SCRIPT, [job.baseModelPath, anatomyPath, cameraPath, projectionPath], "Blender landmark projection");
     const projected = JSON.parse(await readFile(projectionPath, "utf8"));
+    console.info("Anatomy projection complete", { jobId: job.id, family: anatomy.family, requested: projected.requestedCount, projected: projected.projectedCount, missed: projected.missed });
     job.rigAnalysis = mergeSmartRigAnalysis(anatomy, projected, fallbackFamily);
     job.bodyType = job.rigAnalysis.family === "quadruped" ? "quadruped" : "biped";
-    await writeFile(join(job.directory, "rig-guide.json"), JSON.stringify(job.rigAnalysis, null, 2));
     if (job.rigAnalysis.status === "corrected") {
       await runBlenderRig(job, true);
       return;

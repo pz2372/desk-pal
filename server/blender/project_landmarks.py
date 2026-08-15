@@ -2,7 +2,6 @@
 
 import bpy
 import json
-import math
 import os
 import sys
 from mathutils import Matrix, Vector
@@ -74,13 +73,16 @@ def main():
     views = {view["name"]: view for view in camera_data["views"]}
     diagonal = max(float(camera_data.get("diagonal", 1.0)), 0.1)
     projected = []
+    missed = []
 
     for landmark in anatomy.get("landmarks", []):
         view = views.get(landmark.get("view"))
-        if not view or not landmark.get("visible"):
+        if not view:
+            missed.append({"name": landmark.get("name"), "reason": "unknown_view"})
             continue
         x, y = float(landmark.get("x", -1)), float(landmark.get("y", -1))
         if not (0 <= x <= 1 and 0 <= y <= 1):
+            missed.append({"name": landmark.get("name"), "reason": "invalid_coordinate"})
             continue
         matrix = Matrix(view["matrixWorld"])
         width, height = view.get("resolution", [640, 640])
@@ -94,11 +96,13 @@ def main():
         direction.normalize()
         position = ray_midpoint(tree, origin, direction, diagonal)
         if position is not None:
-            projected.append({"name": landmark["name"], "position": gltf_point(position), "view": landmark["view"]})
+            projected.append({"name": landmark["name"], "position": gltf_point(position), "view": landmark["view"], "confidence": landmark.get("confidence", 0), "visible": bool(landmark.get("visible"))})
+        else:
+            missed.append({"name": landmark.get("name"), "reason": "ray_missed_mesh", "view": landmark.get("view")})
 
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as handle:
-        json.dump({"landmarks": projected}, handle, indent=2)
+        json.dump({"landmarks": projected, "missed": missed, "requestedCount": len(anatomy.get("landmarks", [])), "projectedCount": len(projected)}, handle, indent=2)
 
 
 if __name__ == "__main__":

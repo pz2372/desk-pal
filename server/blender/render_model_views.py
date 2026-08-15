@@ -2,7 +2,6 @@
 
 import bpy
 import json
-import math
 import os
 import sys
 from mathutils import Vector
@@ -52,7 +51,7 @@ def main():
     scene = bpy.context.scene
     try:
         scene.render.engine = "BLENDER_EEVEE_NEXT"
-    except TypeError:
+    except (TypeError, ValueError):
         scene.render.engine = "BLENDER_EEVEE"
     scene.render.resolution_x = 640
     scene.render.resolution_y = 640
@@ -60,6 +59,8 @@ def main():
     scene.render.image_settings.file_format = "PNG"
     scene.render.image_settings.color_mode = "RGBA"
     scene.render.film_transparent = False
+    if scene.world is None:
+        scene.world = bpy.data.worlds.new("DeskPalAnalysisWorld")
     scene.world.color = (0.035, 0.045, 0.065)
     scene.camera = None
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createRigAnalysis, mergeSmartRigAnalysis, validateRigCorrections } from "./rigging.mjs";
+import { createRigAnalysis, mergeSmartRigAnalysis, validateBlenderGuide, validateRigCorrections } from "./rigging.mjs";
 
 describe("rig guide templates", () => {
   it("creates a quadruped guide with an optional tail", () => {
@@ -38,5 +38,20 @@ describe("rig guide templates", () => {
     const merged = mergeSmartRigAnalysis({ family: "humanoid", landmarks }, projected);
     expect(merged.status).toBe("needs_correction");
     expect(merged.landmarks.find((point) => point.name === "left_hand").position).toBeUndefined();
+  });
+
+  it("fills secondary humanoid joints from reliable core anchors", () => {
+    const core = ["head", "pelvis", "left_hand", "right_hand", "left_foot", "right_foot"];
+    const vision = { family: "humanoid", landmarks: core.map((name) => ({ name, visible: true, confidence: 0.9 })) };
+    const projected = { landmarks: core.map((name, index) => ({ name, position: [index - 2.5, 3 - index / 2, 0] })) };
+    const merged = mergeSmartRigAnalysis(vision, projected);
+    expect(merged.status).toBe("corrected");
+    expect(merged.landmarks.find((point) => point.name === "left_elbow").position).toHaveLength(3);
+    expect(() => validateBlenderGuide(merged)).not.toThrow();
+  });
+
+  it("rejects an incomplete guide before Blender starts", () => {
+    const guide = createRigAnalysis("biped", false);
+    expect(() => validateBlenderGuide(guide)).toThrow(/missing top of head/i);
   });
 });

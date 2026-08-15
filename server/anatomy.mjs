@@ -24,11 +24,32 @@ export const ANATOMY_SCHEMA = {
   required: ["family", "species", "hasTail", "hasWings", "confidence", "explanation", "landmarks"],
 };
 
-const PROMPT = `You are Desk Pal's anatomical landmark detector. Analyze neutral renders of a completed, unrigged GLB, using the original character images only as semantic references.
+export const ANATOMY_PROMPT = `You are the anatomical planning stage of an automatic Blender rigging pipeline. Your output is not a general description or an illustration: it supplies 2D landmark coordinates that will be ray-projected onto the actual completed GLB and used to build its skeleton.
 
-Choose humanoid only for an upright two-leg/two-arm skeleton, quadruped for four load-bearing limbs, or unsupported otherwise. Use the character's own left and right. Coordinates refer to a supplied GLB render: x runs left-to-right and y top-to-bottom, both normalized 0..1. Select the view where each joint is clearest and put the point at the anatomical joint center inside the visible form, not merely on its silhouette.
+INPUT CONTRACT
+- Original character images appear first. Use them to understand identity, anatomy, and appendages.
+- Six neutral orthographic renders of the completed GLB follow, each explicitly labeled front, front_left, left, back, right, or front_right.
+- Original images are semantic references only. Every returned x/y coordinate MUST refer to one labeled GLB render.
 
-For humanoids return exactly: head, pelvis, left/right shoulder, elbow, hand, hip, knee, and foot. For quadrupeds return exactly: head, chest, pelvis, front left/right shoulder, elbow, paw, and back left/right hip, knee, paw. Add tail_base and tail_tip when a tail exists. Add left_wing_tip and right_wing_tip when wings exist. Every required point must appear once. When occluded, infer a best coordinate using symmetry and other views, but set visible false and lower confidence. Do not invent extra landmarks.`;
+BODY CONTRACT
+- Choose humanoid for an upright creature with two legs and two arm-like forelimbs, including stylized fantasy creatures.
+- Choose quadruped for a creature whose four limbs primarily support locomotion.
+- Choose unsupported only when neither canonical skeleton can reasonably animate the model.
+- Detect anatomy from what is actually present. Do not add wings, tails, arms, or legs merely because a known species normally has them.
+- Use the character's anatomical left and right, never the viewer's left and right.
+
+LANDMARK CONTRACT
+- x is normalized left-to-right and y is normalized top-to-bottom in the selected GLB render, both in 0..1.
+- Select the render where that body region is most clearly separated from other geometry.
+- Put coordinates at the anatomical joint center inside the character silhouette, not on its outline.
+- All skeleton joints are under the skin. Set visible=true when the selected render provides a usable body-region coordinate for ray projection, even when the precise joint center is anatomically inferred.
+- If a far-side joint is occluded in one render, use another render. If necessary, infer it using bilateral symmetry and still choose the render where that inferred ray passes through the correct limb.
+- Set visible=false only when none of the six GLB renders provides a usable ray through that body region. Reduce confidence for inferred points, but always provide the best coordinate.
+
+Return every required landmark exactly once.
+Humanoid: head (top/center of skull), pelvis (center between hips), left/right shoulder, elbow, hand/wrist, hip, knee, and foot/ankle.
+Quadruped: head, chest, pelvis, front left/right shoulder, elbow, paw, and back left/right hip, knee, paw.
+If a tail exists, add tail_base at its attachment to the body and tail_tip at the end of its deformable geometry. If wings actually exist, add left_wing_tip and right_wing_tip. Do not invent extra landmarks.`;
 
 function outputText(response) {
   for (const item of response?.output || []) for (const content of item?.content || []) {
@@ -51,6 +72,8 @@ export function validateAnatomyResult(value) {
 }
 
 export async function analyzeModelAnatomy(originalImages, renders, geometry, options = {}) {
+  if (!Array.isArray(originalImages) || originalImages.length < 1 || originalImages.length > 3) throw new Error("GPT anatomy analysis requires one to three original images.");
+  if (!Array.isArray(renders) || renders.length !== VIEWS.length || VIEWS.some((name) => !renders.some((render) => render?.name === name && typeof render?.dataUrl === "string"))) throw new Error("GPT anatomy analysis requires all six labeled GLB renders.");
   const apiKey = options.apiKey || process.env.OPENAI_API_KEY;
   if (!apiKey) throw new Error("GPT anatomy analysis is not configured.");
   const content = [{ type: "input_text", text: `Geometry summary: ${JSON.stringify(geometry)}\nThe original images come first, followed by six labeled GLB renders. Place all coordinates on the GLB renders only.` }];
@@ -58,7 +81,7 @@ export async function analyzeModelAnatomy(originalImages, renders, geometry, opt
   renders.forEach((render) => { content.push({ type: "input_text", text: `GLB render view=${render.name}:` }, { type: "input_image", image_url: render.dataUrl, detail: "high" }); });
   let response;
   try {
-    response = await (options.fetchImpl || fetch)("https://api.openai.com/v1/responses", { method: "POST", headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" }, body: JSON.stringify({ model: options.model || process.env.OPENAI_VISION_MODEL || "gpt-5.6-sol", store: false, input: [{ role: "system", content: PROMPT }, { role: "user", content }], text: { format: { type: "json_schema", name: "desk_pal_model_anatomy", strict: true, schema: ANATOMY_SCHEMA } } }), signal: AbortSignal.timeout(180_000) });
+    response = await (options.fetchImpl || fetch)("https://api.openai.com/v1/responses", { method: "POST", headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" }, body: JSON.stringify({ model: options.model || process.env.OPENAI_VISION_MODEL || "gpt-5.6-sol", store: false, input: [{ role: "system", content: ANATOMY_PROMPT }, { role: "user", content }], text: { format: { type: "json_schema", name: "desk_pal_model_anatomy", strict: true, schema: ANATOMY_SCHEMA } } }), signal: AbortSignal.timeout(180_000) });
   } catch (error) { throw new Error(`Could not reach GPT anatomy analysis: ${error?.message || String(error)}`); }
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(payload?.error?.message || `GPT anatomy analysis failed (${response.status}).`);

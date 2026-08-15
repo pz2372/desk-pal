@@ -99,7 +99,40 @@ export function validateRigCorrections(payload) {
   return { ...guide, status: "corrected", confidence: 1, landmarks };
 }
 
-export const SMART_RIG_CONFIDENCE = 0.72;
+// GPT coordinates are followed by a geometric ray hit and a Blender validation
+// pass, so this threshold should reject guesses—not merely inferred joints.
+export const SMART_RIG_CONFIDENCE = 0.55;
+
+function lerpPoint(start, end, amount) {
+  return start.map((value, index) => value + (end[index] - value) * amount);
+}
+
+function fillTemplateLandmarks(family, landmarks) {
+  const byName = new Map(landmarks.map((landmark) => [landmark.name, landmark]));
+  const position = (name) => byName.get(name)?.position;
+  const fill = (name, point) => {
+    const landmark = byName.get(name);
+    if (landmark && !landmark.position && validPoint(point)) Object.assign(landmark, { position: point, confidence: Math.max(landmark.confidence, 0.5), source: "inferred" });
+  };
+  if (family === "humanoid" && position("pelvis") && position("head")) {
+    const chest = lerpPoint(position("pelvis"), position("head"), 0.58);
+    for (const side of ["left", "right"]) {
+      if (position(`${side}_hand`)) fill(`${side}_shoulder`, lerpPoint(chest, position(`${side}_hand`), 0.24));
+      if (position(`${side}_shoulder`) && position(`${side}_hand`)) fill(`${side}_elbow`, lerpPoint(position(`${side}_shoulder`), position(`${side}_hand`), 0.55));
+      if (position(`${side}_foot`)) fill(`${side}_hip`, lerpPoint(position("pelvis"), position(`${side}_foot`), 0.16));
+      if (position(`${side}_hip`) && position(`${side}_foot`)) fill(`${side}_knee`, lerpPoint(position(`${side}_hip`), position(`${side}_foot`), 0.56));
+    }
+  }
+  if (family === "quadruped" && position("chest") && position("pelvis")) {
+    for (const side of ["left", "right"]) {
+      if (position(`front_${side}_paw`)) fill(`front_${side}_shoulder`, lerpPoint(position("chest"), position(`front_${side}_paw`), 0.15));
+      if (position(`front_${side}_shoulder`) && position(`front_${side}_paw`)) fill(`front_${side}_elbow`, lerpPoint(position(`front_${side}_shoulder`), position(`front_${side}_paw`), 0.55));
+      if (position(`back_${side}_paw`)) fill(`back_${side}_hip`, lerpPoint(position("pelvis"), position(`back_${side}_paw`), 0.15));
+      if (position(`back_${side}_hip`) && position(`back_${side}_paw`)) fill(`back_${side}_knee`, lerpPoint(position(`back_${side}_hip`), position(`back_${side}_paw`), 0.55));
+    }
+  }
+  return landmarks;
+}
 
 export function mergeSmartRigAnalysis(vision, projected, fallbackFamily = "humanoid") {
   const family = ["humanoid", "quadruped"].includes(vision?.family) ? vision.family : fallbackFamily;
@@ -110,14 +143,29 @@ export function mergeSmartRigAnalysis(vision, projected, fallbackFamily = "human
   });
   const visionPoints = new Map((Array.isArray(vision?.landmarks) ? vision.landmarks : []).map((point) => [point.name, point]));
   const projectedPoints = new Map((Array.isArray(projected?.landmarks) ? projected.landmarks : []).map((point) => [point.name, point.position]));
-  const landmarks = guide.landmarks.map((landmark) => {
+  const landmarks = fillTemplateLandmarks(family, guide.landmarks.map((landmark) => {
     const detected = visionPoints.get(landmark.name);
     const position = projectedPoints.get(landmark.name);
     const confidence = Number(detected?.confidence || 0);
-    const usable = Boolean(detected?.visible && confidence >= SMART_RIG_CONFIDENCE && validPoint(position));
+    const usable = Boolean(confidence >= SMART_RIG_CONFIDENCE && validPoint(position));
     return { ...landmark, position: usable ? position.map(Number) : undefined, confidence, source: "inferred" };
-  });
+  }));
   const complete = landmarks.every((landmark) => !landmark.required || Boolean(landmark.position));
   const confidence = landmarks.length ? landmarks.reduce((sum, landmark) => sum + landmark.confidence, 0) / landmarks.length : 0;
   return { ...guide, status: complete ? "corrected" : "needs_correction", confidence, landmarks };
+}
+
+export function validateBlenderGuide(guide) {
+  if (!guide || !["humanoid", "quadruped"].includes(guide.family)) throw new Error("The Blender rig guide has an unsupported body family.");
+  const template = RIG_TEMPLATES[guide.family];
+  if (guide.templateId !== template.id) throw new Error("The Blender rig guide uses the wrong skeleton template.");
+  const names = new Set();
+  for (const landmark of Array.isArray(guide.landmarks) ? guide.landmarks : []) {
+    if (names.has(landmark.name)) throw new Error(`The Blender rig guide repeats ${landmark.name}.`);
+    names.add(landmark.name);
+    if (landmark.required && !validPoint(landmark.position)) throw new Error(`The Blender rig guide is missing ${landmark.label.toLowerCase()}.`);
+    if (landmark.position && !validPoint(landmark.position)) throw new Error(`The Blender coordinate for ${landmark.label.toLowerCase()} is invalid.`);
+  }
+  for (const [name, label] of template.landmarks) if (!names.has(name)) throw new Error(`The Blender rig guide is missing ${label.toLowerCase()}.`);
+  return guide;
 }

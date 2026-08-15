@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { analyzeModelAnatomy, validateAnatomyResult } from "./anatomy.mjs";
+import { analyzeModelAnatomy, ANATOMY_PROMPT, validateAnatomyResult } from "./anatomy.mjs";
 
 const result = {
   family: "humanoid", species: "stylized character", hasTail: false, hasWings: false,
@@ -17,10 +17,16 @@ describe("GPT model anatomy", () => {
     expect(body.store).toBe(false);
     expect(body.text.format.strict).toBe(true);
     expect(body.input[1].content.filter((item) => item.type === "input_image")).toHaveLength(7);
+    expect(body.input[0].content).toContain("Every returned x/y coordinate MUST refer to one labeled GLB render");
+    expect(ANATOMY_PROMPT).toContain("Do not add wings");
   });
 
   it("deduplicates and clamps landmark results", () => {
     const value = validateAnatomyResult({ ...result, landmarks: [result.landmarks[0], { ...result.landmarks[0], x: 2 }] });
     expect(value.landmarks).toHaveLength(1);
+  });
+
+  it("refuses to analyze an incomplete render set", async () => {
+    await expect(analyzeModelAnatomy(["data:image/png;base64,AAAA"], [{ name: "front", dataUrl: "data:image/png;base64,AAAA" }], {}, { apiKey: "test" })).rejects.toThrow(/six labeled GLB renders/i);
   });
 });
