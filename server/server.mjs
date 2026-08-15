@@ -30,7 +30,7 @@ function send(response, status, payload, headers = {}) {
 }
 
 function publicJob(job) {
-  return { id: job.id, stage: job.stage, progress: job.progress, message: job.message, error: job.error, bodyType: job.bodyType, rigAnalysis: job.rigAnalysis, baseModelUrl: job.baseModelPath ? `/v1/jobs/${job.id}/base-model?token=${job.token}` : undefined, modelUrl: job.stage === "completed" ? `/v1/jobs/${job.id}/model?token=${job.token}` : undefined };
+  return { id: job.id, stage: job.stage, progress: job.progress, message: job.message, error: job.error, analysisStep: job.analysisStep, bodyType: job.bodyType, rigAnalysis: job.rigAnalysis, baseModelUrl: job.baseModelPath ? `/v1/jobs/${job.id}/base-model?token=${job.token}` : undefined, modelUrl: job.stage === "completed" ? `/v1/jobs/${job.id}/model?token=${job.token}` : undefined };
 }
 
 function allowRequest(ip, bucket = rateBuckets, limit = 5) {
@@ -57,6 +57,14 @@ function dataImage(dataUrl) {
   if (!data.length || data.length > 20 * 1024 * 1024) throw new Error("Image must be 20 MB or smaller.");
   const ext = match[1] === "image/jpeg" ? "jpg" : match[1].split("/")[1];
   return { data, mime: match[1], ext };
+}
+
+function dataModel(dataUrl) {
+  const match = /^data:model\/gltf-binary;base64,([A-Za-z0-9+/=]+)$/.exec(dataUrl || "");
+  if (!match) throw new Error("Only a base64 GLB model is accepted.");
+  const data = Buffer.from(match[1], "base64");
+  if (data.length < 20 || data.length > 60 * 1024 * 1024 || data.subarray(0, 4).toString() !== "glTF") throw new Error("The GLB model is invalid or larger than 60 MB.");
+  return data;
 }
 
 async function tripo(path, options = {}) {
@@ -176,12 +184,14 @@ async function smartRigFallback(job, images, suggestedBodyType, fallbackMessage)
   if (!process.env.OPENAI_API_KEY) { update(job, "needs_correction", 62, fallbackMessage); return; }
   try {
     update(job, "analyzing", 62, "GPT is finding anatomical landmarks on the finished 3D model…");
+    job.analysisStep = "rendering_glb_views";
     const renderDirectory = join(job.directory, "anatomy-views");
     await mkdir(renderDirectory, { recursive: true });
     await runBlender(job, RENDER_SCRIPT, [job.baseModelPath, renderDirectory], "Blender model rendering");
     const cameraPath = join(renderDirectory, "cameras.json");
     const cameras = JSON.parse(await readFile(cameraPath, "utf8"));
     const renders = await Promise.all(MODEL_VIEWS.map(async (name) => ({ name, dataUrl: `data:image/png;base64,${(await readFile(join(renderDirectory, `${name}.png`))).toString("base64")}` })));
+    job.analysisStep = "requesting_gpt_landmarks";
     const anatomy = await analyzeModelAnatomy(images.map((image) => `data:${image.mime};base64,${image.data.toString("base64")}`), renders, {
       bounds: cameras.bounds, dimensions: cameras.dimensions, meshCount: cameras.meshCount, vertexCount: cameras.vertexCount,
     });
@@ -189,10 +199,12 @@ async function smartRigFallback(job, images, suggestedBodyType, fallbackMessage)
     const anatomyPath = join(job.directory, "anatomy-analysis.json");
     const projectionPath = join(job.directory, "projected-landmarks.json");
     await writeFile(anatomyPath, JSON.stringify(anatomy, null, 2));
+    job.analysisStep = "projecting_landmarks";
     await runBlender(job, PROJECT_SCRIPT, [job.baseModelPath, anatomyPath, cameraPath, projectionPath], "Blender landmark projection");
     const projected = JSON.parse(await readFile(projectionPath, "utf8"));
     console.info("Anatomy projection complete", { jobId: job.id, family: anatomy.family, requested: projected.requestedCount, projected: projected.projectedCount, missed: projected.missed });
     job.rigAnalysis = mergeSmartRigAnalysis(anatomy, projected, fallbackFamily);
+    job.analysisStep = "building_blender_rig";
     job.bodyType = job.rigAnalysis.family === "quadruped" ? "quadruped" : "biped";
     if (job.rigAnalysis.status === "corrected") {
       await runBlenderRig(job, true);
@@ -200,13 +212,15 @@ async function smartRigFallback(job, images, suggestedBodyType, fallbackMessage)
     }
     update(job, "needs_correction", 69, "GPT found the creature’s anatomy. Please place only the uncertain points.");
   } catch (error) {
-    console.error("Smart rig analysis failed", { jobId: job.id, error: error instanceof Error ? error.message : String(error) });
+    const detail = error instanceof Error ? error.message : String(error);
+    console.error("Smart rig analysis failed", { jobId: job.id, step: job.analysisStep, error: detail });
     if (job.rigAnalysis?.status === "corrected") {
       const uncertain = [...job.rigAnalysis.landmarks].sort((left, right) => left.confidence - right.confidence)[0];
       if (uncertain) uncertain.position = undefined;
       job.rigAnalysis.status = "needs_correction";
     }
     update(job, "needs_correction", 62, "Automatic anatomy analysis needs a few corrected points.");
+    job.error = `${job.analysisStep || "anatomy_analysis"}: ${detail}`;
   }
 }
 
@@ -328,7 +342,7 @@ async function handler(request, response) {
   response.setHeader("access-control-allow-headers", "content-type");
   if (request.method === "OPTIONS") { response.writeHead(204); return response.end(); }
   const url = new URL(request.url, `http://${request.headers.host || "localhost"}`);
-  if (request.method === "GET" && url.pathname === "/health") return send(response, 200, { ok: true, generationConfigured: Boolean(TRIPO_API_KEY), preflightConfigured: Boolean(process.env.OPENAI_API_KEY), smartRigConfigured: Boolean(process.env.OPENAI_API_KEY && BLENDER_BIN) });
+  if (request.method === "GET" && url.pathname === "/health") return send(response, 200, { ok: true, release: process.env.RENDER_GIT_COMMIT?.slice(0, 7) || "local", generationConfigured: Boolean(TRIPO_API_KEY), preflightConfigured: Boolean(process.env.OPENAI_API_KEY), smartRigConfigured: Boolean(process.env.OPENAI_API_KEY && BLENDER_BIN) });
   if (request.method === "POST" && url.pathname === "/v1/preflight") {
     if (!process.env.OPENAI_API_KEY) return send(response, 503, { error: "The GPT image-quality check is not configured." });
     if (!allowRequest(request.socket.remoteAddress || "unknown", preflightBuckets, 15)) return send(response, 429, { error: "Image check limit reached. Try again later." });
@@ -356,6 +370,23 @@ async function handler(request, response) {
       const id = randomUUID(); const token = randomBytes(24).toString("hex");
       const job = { id, token, stage: "uploading", progress: 2, message: "Preparing your images…", createdAt: Date.now(), directory: join(DATA_ROOT, id), cancelled: false };
       jobs.set(id, job); generate(job, images, filenames, classifiedViews);
+      return send(response, 202, { id, token });
+    } catch (error) { return send(response, 400, { error: error instanceof Error ? error.message : String(error) }); }
+  }
+  if (request.method === "POST" && url.pathname === "/v1/rig-existing") {
+    if (!process.env.OPENAI_API_KEY) return send(response, 503, { error: "Smart rigging is not configured." });
+    if (!allowRequest(request.socket.remoteAddress || "unknown")) return send(response, 429, { error: "Rigging limit reached. Try again later." });
+    try {
+      const payload = await bodyJson(request);
+      const dataUrls = Array.isArray(payload.dataUrls) ? payload.dataUrls : [payload.dataUrl];
+      if (dataUrls.length < 1 || dataUrls.length > 3) throw new Error("Choose between one and three reference images.");
+      const images = dataUrls.map(dataImage);
+      const model = dataModel(payload.modelDataUrl);
+      const id = randomUUID(); const token = randomBytes(24).toString("hex");
+      const directory = join(DATA_ROOT, id); const baseModelPath = join(directory, "base.glb");
+      await mkdir(directory, { recursive: true }); await writeFile(baseModelPath, model);
+      const job = { id, token, stage: "analyzing", progress: 60, message: "Preparing the existing model for smart rigging…", createdAt: Date.now(), directory, baseModelPath, cancelled: false };
+      jobs.set(id, job); smartRigFallback(job, images, "biped", "Please help locate this character’s body parts.");
       return send(response, 202, { id, token });
     } catch (error) { return send(response, 400, { error: error instanceof Error ? error.message : String(error) }); }
   }
