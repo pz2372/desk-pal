@@ -12,7 +12,7 @@ npm run test
 npm run tauri dev
 ```
 
-The desktop app never asks for or stores a Tripo key. Start the generation server described in [server/README.md](server/README.md); only that server receives `TRIPO_API_KEY`.
+The desktop app never asks for or stores provider keys. Start the generation server described in [server/README.md](server/README.md); only that server receives `TRIPO_API_KEY` and `OPENAI_API_KEY`.
 
 ## Local AI runtime
 

@@ -1,5 +1,5 @@
 import { convertFileSrc, invoke, isTauri } from "@tauri-apps/api/core";
-import type { AppSnapshot, LocalAiReply, PetConfig, RigAnalysis } from "../types";
+import type { AppSnapshot, LocalAiReply, PetConfig, PreflightImage, PreflightResult, RigAnalysis } from "../types";
 import { EMPTY_SNAPSHOT } from "../types";
 
 const browserSnapshot: AppSnapshot = { ...EMPTY_SNAPSHOT };
@@ -11,13 +11,15 @@ export async function command<T>(name: string, args: Record<string, unknown> = {
     const message = String(args.message ?? "");
     return { reply: `I heard “${message.slice(0, 42)}.” ✦`, emotion: "curious", action: "react", localModel: false } as T;
   }
+  if (name === "preflight_images") return { passed: true, summary: "Images are ready.", images: (args.dataUrls as string[] || []).map((_, index) => ({ index, angle: index === 0 ? "front" : index === 1 ? "left" : "back", description: "Browser preview" })), issues: [] } as T;
   return undefined as T;
 }
 
 export const getSnapshot = () => command<AppSnapshot>("get_app_snapshot");
 export const getPetSnapshot = (petId: string) => command<AppSnapshot>("get_pet_snapshot", { petId });
 export const selectPet = (petId: string) => command<void>("select_pet", { petId });
-export const startGeneration = (dataUrl: string, filename: string) => command<string>("start_generation", { dataUrl, filename });
+export const preflightImages = (dataUrls: string[]) => command<PreflightResult>("preflight_images", { dataUrls });
+export const startGeneration = (dataUrls: string[], filenames: string[], views: PreflightImage[]) => command<string>("start_generation", { dataUrls, filenames, views });
 export const cancelGeneration = () => command<void>("cancel_generation");
 export const useImageCandidate = () => command<void>("use_image_candidate");
 export const useModelCandidate = () => command<void>("use_model_candidate");

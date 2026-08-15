@@ -1,6 +1,6 @@
 # Desk Pal generation server
 
-This service is the only component that receives the Tripo API key. The desktop app never asks for or stores it.
+This service is the only component that receives the Tripo and OpenAI API keys. The desktop app never asks for or stores them.
 
 For local development:
 
@@ -13,6 +13,8 @@ Open `server/.env` and replace the example value with your real server-side key:
 
 ```dotenv
 TRIPO_API_KEY=tsk_your_real_key
+OPENAI_API_KEY=sk_your_real_key
+OPENAI_VISION_MODEL=gpt-5.6-sol
 HOST=127.0.0.1
 PORT=8787
 BLENDER_BIN=blender
@@ -24,11 +26,16 @@ Then start the service:
 npm run server
 ```
 
-The guided fallback requires Blender 3.4 or newer to be installed. Verify it with
-`blender --version`. When Tripo cannot rig a humanoid or quadruped, the app asks
-the user for a small set of 3D landmarks and this service runs Blender in
-background mode to create the armature, automatic skin weights, validation, and
-starter `idle`, `walk`, `turn`, `jump`, and `react` actions.
+The smart rigging path requires Blender 3.4 or newer to be installed. Verify it with
+`blender --version`. After Tripo creates the unrigged model, Blender renders six
+neutral views of the completed GLB. GPT compares those renders with
+the original upload, classifies the body, and returns strict normalized landmark
+coordinates. Blender ray-projects confident points onto the actual mesh, creates
+the armature, applies automatic skin weights, validates it, and exports starter
+`idle`, `walk`, `turn`, `jump`, and `react` actions. Only low-confidence or
+unprojectable points are sent to the existing guided correction screen. When
+`OPENAI_API_KEY` is configured this replaces paid Tripo rigging/retargeting; the
+older Tripo animation path is retained only as a no-GPT fallback.
 
 For Render, deploy the repository root as a **Docker Web Service**. The included
 [`Dockerfile`](../Dockerfile) installs Node and Blender. Configure:
@@ -37,7 +44,11 @@ For Render, deploy the repository root as a **Docker Web Service**. The included
 Health Check Path: /health
 ```
 
-Add `TRIPO_API_KEY` in Render's Environment settings. The Docker image sets the
+Add `TRIPO_API_KEY` and `OPENAI_API_KEY` in Render's Environment settings. The
+optional `OPENAI_VISION_MODEL` setting defaults to `gpt-5.6-sol`. Before a paid
+Tripo job starts, the server sends the selected character views to the OpenAI
+Responses API with storage disabled and returns actionable image-quality issues.
+The Docker image sets the
 Blender path and start command; Render supplies `PORT` automatically. Blender is
 memory intensive, so a service with at least 2 GB RAM is recommended for real
 generation jobs.

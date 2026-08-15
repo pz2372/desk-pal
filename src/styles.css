@@ -50,6 +50,32 @@ textarea { resize: none; min-height: 70px; }.text-input:focus, textarea:focus { 
 .button-row { display: flex; gap: 12px; margin-top: 23px; }.button-row .primary-button { flex: 1; }.button-row .ghost-button { width: 110px; }
 .drop-zone { height: 270px; border: 1px dashed #ffffff22; background: #090a13a8; border-radius: 18px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 9px; cursor: pointer; overflow: hidden; color: #756f88; }
 .drop-zone:hover { border-color: #288fff; background: #087cff0d; box-shadow: inset 0 0 35px #087cff0d; }.drop-zone strong { color: #d5d1df; font-size: 13px; }.drop-zone span { font-size: 10px; }.drop-zone input { display: none; }.drop-zone.has-image img { width: 100%; height: 100%; object-fit: contain; }
+.upload-panel { max-width: 600px; padding: 18px 0; }
+.upload-panel .panel-icon { margin-bottom: 18px; }
+.upload-panel > p:not(.eyebrow) { margin-bottom: 14px; }
+.image-guidelines { margin-bottom: 15px; padding: 13px 15px; border: 1px solid #3497ff38; border-radius: 14px; background: #0e29485c; }
+.image-guidelines > strong { color: #e6f3ff; font-size: 13px; }
+.image-guidelines ul { display: grid; gap: 6px; margin: 9px 0; padding: 0; list-style: none; }
+.image-guidelines li { display: flex; align-items: center; gap: 8px; color: #b8c9da; font-size: 12px; }
+.image-guidelines li svg { width: 14px; height: 14px; flex: 0 0 auto; color: #58b4ff; }
+.image-guidelines p { margin: 0; color: #8fa2b5; font-size: 11px; line-height: 1.45; }
+.multi-image-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 9px; }
+.multi-image-grid .drop-zone { height: 160px; position: relative; gap: 7px; padding: 30px 8px 10px; text-align: center; }
+.multi-image-grid .drop-zone > b { position: absolute; z-index: 2; top: 9px; left: 8px; right: 8px; overflow: hidden; color: #a9c8e5; font-size: 10px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.multi-image-grid .drop-zone > svg { width: 25px; }
+.multi-image-grid .drop-zone.has-image { padding: 0; }
+.multi-image-grid .drop-zone.has-image > b { padding: 4px 7px; border-radius: 7px; background: #050913c7; backdrop-filter: blur(6px); }
+.preflight-warning { max-height: 220px; margin-bottom: 14px; padding: 13px; overflow-y: auto; border: 1px solid #ff78864d; border-radius: 14px; background: #391921ad; }
+.preflight-warning > div { display: flex; align-items: center; gap: 10px; color: #ff919b; }
+.preflight-warning > div > svg { width: 20px; flex: 0 0 auto; }
+.preflight-warning > div span { display: grid; gap: 2px; }
+.preflight-warning > div strong { color: #ffe4e6; font-size: 13px; }
+.preflight-warning > div small { color: #c89ba0; font-size: 10px; }
+.preflight-warning ul { display: grid; gap: 9px; margin: 12px 0 0; padding: 0; list-style: none; }
+.preflight-warning li { display: grid; gap: 2px; padding-top: 9px; border-top: 1px solid #ffffff12; }
+.preflight-warning li strong { color: #ffb3ba; font-size: 10px; text-transform: capitalize; }
+.preflight-warning li span { color: #e2c4c7; font-size: 11px; line-height: 1.4; }
+.preflight-warning li small { color: #ac9498; font-size: 10px; line-height: 1.4; }
 .progress-panel { text-align: center; }.creation-orbit { width: 110px; height: 110px; margin: 0 auto 26px; display: grid; place-items: center; color: #45a7ff; position: relative; filter: drop-shadow(0 0 12px #087cff88); }.orbit-ring { position: absolute; inset: 0; border: 1px solid #087cff55; border-radius: 50%; border-top-color: #66c4ff; animation: spin 2.2s linear infinite; }.orbit-ring::after { content: ""; position: absolute; width: 7px; height: 7px; border-radius: 50%; background: #75cdff; right: 9px; top: 16px; box-shadow: 0 0 22px #2ba4ff; }
 @keyframes spin { to { transform: rotate(360deg); } }.spin { animation: spin 1s linear infinite; }
 .progress-track { height: 5px; background: #ffffff0c; border-radius: 10px; overflow: hidden; margin-top: 32px; }.progress-track span { display: block; height: 100%; background: linear-gradient(90deg, #064bcf, #37afff); border-radius: inherit; box-shadow: 0 0 16px #138dff; transition: width .5s ease; }.progress-meta { display: flex; justify-content: space-between; text-transform: capitalize; font-size: 10px; color: #787487; margin-top: 8px; }

@@ -47,13 +47,13 @@ def build_humanoid(edit_bones, points):
     add_bone(edit_bones, "head", lerp(neck, head, 0.55), head, neck_bone)
     for side in ("left", "right"):
         hand = points[f"{side}_hand"]
-        shoulder = lerp(chest, hand, 0.24)
-        elbow = lerp(shoulder, hand, 0.55)
+        shoulder = points.get(f"{side}_shoulder", lerp(chest, hand, 0.24))
+        elbow = points.get(f"{side}_elbow", lerp(shoulder, hand, 0.55))
         upper = add_bone(edit_bones, f"upper_arm_{side[0]}", shoulder, elbow, chest_bone)
         add_bone(edit_bones, f"forearm_{side[0]}", elbow, hand, upper)
         foot = points[f"{side}_foot"]
-        hip = lerp(pelvis, foot, 0.16)
-        knee = lerp(hip, foot, 0.56)
+        hip = points.get(f"{side}_hip", lerp(pelvis, foot, 0.16))
+        knee = points.get(f"{side}_knee", lerp(hip, foot, 0.56))
         thigh = add_bone(edit_bones, f"thigh_{side[0]}", hip, knee, spine)
         add_bone(edit_bones, f"shin_{side[0]}", knee, foot, thigh)
     return chest_bone, root
@@ -69,8 +69,12 @@ def build_quadruped(edit_bones, points):
     for end, anchor, prefix in (("front", chest, "front"), ("back", pelvis, "back")):
         for side in ("left", "right"):
             paw = points[f"{end}_{side}_paw"]
-            upper_start = lerp(anchor, paw, 0.15)
-            joint = lerp(upper_start, paw, 0.55)
+            if end == "front":
+                upper_start = points.get(f"front_{side}_shoulder", lerp(anchor, paw, 0.15))
+                joint = points.get(f"front_{side}_elbow", lerp(upper_start, paw, 0.55))
+            else:
+                upper_start = points.get(f"back_{side}_hip", lerp(anchor, paw, 0.15))
+                joint = points.get(f"back_{side}_knee", lerp(upper_start, paw, 0.55))
             upper = add_bone(edit_bones, f"{prefix}_upper_{side[0]}", upper_start, joint, spine)
             add_bone(edit_bones, f"{prefix}_lower_{side[0]}", joint, paw, upper)
     return spine, root

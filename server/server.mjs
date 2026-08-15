@@ -3,7 +3,9 @@ import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { randomBytes, randomUUID } from "node:crypto";
 import { extname, join } from "node:path";
 import { spawn } from "node:child_process";
-import { createRigAnalysis, validateRigCorrections } from "./rigging.mjs";
+import { createRigAnalysis, familyForBodyType, mergeSmartRigAnalysis, validateRigCorrections } from "./rigging.mjs";
+import { analyzeImagePreflight } from "./preflight.mjs";
+import { analyzeModelAnatomy } from "./anatomy.mjs";
 
 const PORT = Number(process.env.PORT || 8787);
 const HOST = process.env.HOST || (process.env.RENDER ? "0.0.0.0" : "127.0.0.1");
@@ -12,10 +14,14 @@ const API_ROOT = "https://api.tripo3d.ai/v2/openapi";
 const DATA_ROOT = new URL("./data/jobs/", import.meta.url).pathname;
 const jobs = new Map();
 const rateBuckets = new Map();
-const MAX_BODY = 28 * 1024 * 1024;
+const preflightBuckets = new Map();
+const MAX_BODY = 85 * 1024 * 1024;
 const REQUIRED_PIPELINE_CREDITS = 105;
 const BLENDER_BIN = process.env.BLENDER_BIN || "blender";
 const RIG_SCRIPT = new URL("./blender/rig_pet.py", import.meta.url).pathname;
+const RENDER_SCRIPT = new URL("./blender/render_model_views.py", import.meta.url).pathname;
+const PROJECT_SCRIPT = new URL("./blender/project_landmarks.py", import.meta.url).pathname;
+const MODEL_VIEWS = ["front", "front_left", "left", "back", "right", "front_right"];
 
 function send(response, status, payload, headers = {}) {
   const body = Buffer.from(JSON.stringify(payload));
@@ -27,11 +33,11 @@ function publicJob(job) {
   return { id: job.id, stage: job.stage, progress: job.progress, message: job.message, error: job.error, bodyType: job.bodyType, rigAnalysis: job.rigAnalysis, baseModelUrl: job.baseModelPath ? `/v1/jobs/${job.id}/base-model?token=${job.token}` : undefined, modelUrl: job.stage === "completed" ? `/v1/jobs/${job.id}/model?token=${job.token}` : undefined };
 }
 
-function allowRequest(ip) {
+function allowRequest(ip, bucket = rateBuckets, limit = 5) {
   const now = Date.now();
-  const recent = (rateBuckets.get(ip) || []).filter((time) => now - time < 60 * 60 * 1000);
-  if (recent.length >= 5) return false;
-  recent.push(now); rateBuckets.set(ip, recent); return true;
+  const recent = (bucket.get(ip) || []).filter((time) => now - time < 60 * 60 * 1000);
+  if (recent.length >= limit) return false;
+  recent.push(now); bucket.set(ip, recent); return true;
 }
 
 async function bodyJson(request) {
@@ -123,45 +129,111 @@ async function downloadGlb(url, target) {
   await writeFile(target, model);
 }
 
-async function runBlenderRig(job) {
-  if (!job.baseModelPath) throw new Error("The base model is unavailable for fallback rigging.");
-  const guidePath = join(job.directory, "rig-guide.json");
-  const outputPath = join(job.directory, "pet.glb");
-  update(job, "rigging", 70, "Blender is fitting and skinning the corrected skeleton…");
-  await new Promise((resolve, reject) => {
-    const child = spawn(BLENDER_BIN, ["--background", "--factory-startup", "--python", RIG_SCRIPT, "--", job.baseModelPath, guidePath, outputPath], { stdio: ["ignore", "pipe", "pipe"] });
+async function runBlender(job, script, args, label, timeoutMs = 10 * 60 * 1000) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(BLENDER_BIN, ["--background", "--factory-startup", "--python", script, "--", ...args], { stdio: ["ignore", "pipe", "pipe"] });
     job.blenderProcess = child;
     let diagnostics = "";
     const collect = (chunk) => { diagnostics = `${diagnostics}${chunk}`.slice(-12_000); };
     child.stdout.on("data", collect); child.stderr.on("data", collect);
-    const timeout = setTimeout(() => { child.kill("SIGKILL"); reject(new Error("Blender rigging timed out.")); }, 10 * 60 * 1000);
-    child.once("error", (error) => { clearTimeout(timeout); job.blenderProcess = undefined; reject(new Error(`Blender could not start: ${error.message}`)); });
+    const timeout = setTimeout(() => { child.kill("SIGKILL"); reject(new Error(`${label} timed out.`)); }, timeoutMs);
+    child.once("error", (error) => { clearTimeout(timeout); job.blenderProcess = undefined; reject(new Error(`${label} could not start: ${error.message}`)); });
     child.once("exit", (code) => {
-      clearTimeout(timeout);
-      job.blenderProcess = undefined;
+      clearTimeout(timeout); job.blenderProcess = undefined;
       if (code === 0) resolve();
-      else reject(new Error(`Blender rigging failed${diagnostics.trim() ? `: ${diagnostics.trim().split("\n").at(-1)}` : "."}`));
+      else reject(new Error(`${label} failed${diagnostics.trim() ? `: ${diagnostics.trim().split("\n").at(-1)}` : "."}`));
     });
   });
+}
+
+async function runBlenderRig(job, automatic = false) {
+  if (!job.baseModelPath) throw new Error("The base model is unavailable for fallback rigging.");
+  const guidePath = join(job.directory, "rig-guide.json");
+  const outputPath = join(job.directory, "pet.glb");
+  update(job, "rigging", 70, "Blender is fitting and skinning the corrected skeleton…");
+  await runBlender(job, RIG_SCRIPT, [job.baseModelPath, guidePath, outputPath], "Blender rigging");
   const model = await readFile(outputPath);
   if (model.length < 20 || model.subarray(0, 4).toString() !== "glTF") throw new Error("Blender returned an invalid GLB model.");
   job.modelPath = outputPath;
   job.rigAnalysis = { ...job.rigAnalysis, status: "corrected", confidence: 1 };
-  update(job, "completed", 100, "Your corrected Blender rig is ready.");
+  update(job, "completed", 100, automatic ? "Your GPT-guided Blender rig is ready." : "Your corrected Blender rig is ready.");
 }
 
-async function generate(job, image, filename) {
+async function smartRigFallback(job, images, suggestedBodyType, fallbackMessage) {
+  const fallbackFamily = familyForBodyType(suggestedBodyType) || "humanoid";
+  job.rigAnalysis = createRigAnalysis(fallbackFamily === "quadruped" ? "quadruped" : "biped", false);
+  if (!process.env.OPENAI_API_KEY) { update(job, "needs_correction", 62, fallbackMessage); return; }
+  try {
+    update(job, "analyzing", 62, "GPT is finding anatomical landmarks on the finished 3D model…");
+    const renderDirectory = join(job.directory, "anatomy-views");
+    await mkdir(renderDirectory, { recursive: true });
+    await runBlender(job, RENDER_SCRIPT, [job.baseModelPath, renderDirectory], "Blender model rendering");
+    const cameraPath = join(renderDirectory, "cameras.json");
+    const cameras = JSON.parse(await readFile(cameraPath, "utf8"));
+    const renders = await Promise.all(MODEL_VIEWS.map(async (name) => ({ name, dataUrl: `data:image/png;base64,${(await readFile(join(renderDirectory, `${name}.png`))).toString("base64")}` })));
+    const anatomy = await analyzeModelAnatomy(images.map((image) => `data:${image.mime};base64,${image.data.toString("base64")}`), renders, {
+      bounds: cameras.bounds, dimensions: cameras.dimensions, meshCount: cameras.meshCount, vertexCount: cameras.vertexCount,
+    });
+    if (anatomy.family === "unsupported") throw new Error("GPT could not map this creature to the current humanoid or quadruped rigs.");
+    const anatomyPath = join(job.directory, "anatomy-analysis.json");
+    const projectionPath = join(job.directory, "projected-landmarks.json");
+    await writeFile(anatomyPath, JSON.stringify(anatomy, null, 2));
+    await runBlender(job, PROJECT_SCRIPT, [job.baseModelPath, anatomyPath, cameraPath, projectionPath], "Blender landmark projection");
+    const projected = JSON.parse(await readFile(projectionPath, "utf8"));
+    job.rigAnalysis = mergeSmartRigAnalysis(anatomy, projected, fallbackFamily);
+    job.bodyType = job.rigAnalysis.family === "quadruped" ? "quadruped" : "biped";
+    await writeFile(join(job.directory, "rig-guide.json"), JSON.stringify(job.rigAnalysis, null, 2));
+    if (job.rigAnalysis.status === "corrected") {
+      await runBlenderRig(job, true);
+      return;
+    }
+    update(job, "needs_correction", 69, "GPT found the creature’s anatomy. Please place only the uncertain points.");
+  } catch (error) {
+    console.error("Smart rig analysis failed", { jobId: job.id, error: error instanceof Error ? error.message : String(error) });
+    if (job.rigAnalysis?.status === "corrected") {
+      const uncertain = [...job.rigAnalysis.landmarks].sort((left, right) => left.confidence - right.confidence)[0];
+      if (uncertain) uncertain.position = undefined;
+      job.rigAnalysis.status = "needs_correction";
+    }
+    update(job, "needs_correction", 62, "Automatic anatomy analysis needs a few corrected points.");
+  }
+}
+
+function multiviewFiles(uploadedViews) {
+  const files = [{}, {}, {}, {}];
+  const slotForAngle = { front: 0, front_three_quarter: 0, left: 1, left_three_quarter: 1, back: 2, right: 3, right_three_quarter: 3 };
+  for (const view of uploadedViews) {
+    const slot = slotForAngle[view.angle];
+    if (slot !== undefined && !files[slot].file_token) files[slot] = { type: view.image.ext, file_token: view.fileToken };
+  }
+  if (!files[0].file_token) {
+    const main = uploadedViews[0];
+    files[0] = { type: main.image.ext, file_token: main.fileToken };
+  }
+  return files;
+}
+
+async function generate(job, images, filenames, classifiedViews) {
   try {
     update(job, "uploading", 3, "Checking generation capacity…");
     await requireGenerationCapacity(job);
-    update(job, "uploading", 5, "Uploading your character securely…");
-    const form = new FormData(); form.append("file", new Blob([image.data], { type: image.mime }), filename);
-    const uploaded = await tripo("/upload/sts", { method: "POST", body: form });
-    const fileToken = uploaded.file_token || uploaded.image_token;
-    if (!fileToken) throw new Error("Tripo returned no image token.");
+    update(job, "uploading", 5, `Uploading ${images.length === 1 ? "your character" : "your character views"} securely…`);
+    const uploadedViews = await Promise.all(images.map(async (image, index) => {
+      const form = new FormData();
+      form.append("file", new Blob([image.data], { type: image.mime }), filenames[index]);
+      const uploaded = await tripo("/upload/sts", { method: "POST", body: form });
+      const fileToken = uploaded.file_token || uploaded.image_token;
+      if (!fileToken) throw new Error("Tripo returned no image token.");
+      return { image, fileToken, angle: classifiedViews.find((view) => view.index === index)?.angle || (index === 0 ? "front" : "unknown") };
+    }));
 
     update(job, "generating", 12, "Sculpting the 3D model…");
-    const generationId = await createTask({ type: "image_to_model", file: { type: image.ext, file_token: fileToken }, model_version: "v3.1-20260211", texture: true, pbr: true, texture_quality: "standard" });
+    const orderedFiles = multiviewFiles(uploadedViews);
+    const usableViewCount = orderedFiles.filter((file) => file.file_token).length;
+    const generationRequest = uploadedViews.length > 1 && usableViewCount > 1
+      ? { type: "multiview_to_model", files: orderedFiles }
+      : { type: "image_to_model", file: { type: uploadedViews[0].image.ext, file_token: uploadedViews[0].fileToken } };
+    const generationId = await createTask({ ...generationRequest, model_version: "v3.1-20260211", texture: true, pbr: true, texture_quality: "standard" });
     job.providerTaskId = generationId;
     const generated = await waitTask(job, generationId, 12, 52);
     const baseModelUrl = outputModelUrl(generated);
@@ -172,6 +244,13 @@ async function generate(job, image, filename) {
     await downloadGlb(baseModelUrl, baseModelPath);
     job.baseModelPath = baseModelPath;
 
+    // With GPT configured, the completed GLB is always analyzed and rigged in
+    // Blender. The provider rigging path below is retained as a no-GPT fallback.
+    if (process.env.OPENAI_API_KEY) {
+      await smartRigFallback(job, images, "biped", "Please help locate this character’s body parts.");
+      return;
+    }
+
     update(job, "rig_check", 54, "Checking the creature’s body and limbs…");
     let checked;
     try {
@@ -179,8 +258,7 @@ async function generate(job, image, filename) {
       checked = await waitTask(job, checkId, 54, 62);
     } catch (error) {
       job.bodyType = "biped";
-      job.rigAnalysis = createRigAnalysis(job.bodyType, false);
-      update(job, "needs_correction", 60, "The automatic body check needs a few corrected points.");
+      await smartRigFallback(job, images, job.bodyType, "The automatic body check needs a few corrected points.");
       return;
     }
     job.bodyType = checked.output?.rig_type || checked.rig_type || "biped";
@@ -189,7 +267,7 @@ async function generate(job, image, filename) {
     if (guidedFamily) job.rigAnalysis = createRigAnalysis(job.bodyType, riggable);
     if (!riggable) {
       if (!guidedFamily) throw new Error("Guided fallback rigging currently supports humanoids and quadrupeds. You can still use the generated static 3D model.");
-      update(job, "needs_correction", 62, "We need a little help locating this character’s body parts.");
+      await smartRigFallback(job, images, job.bodyType, "We need a little help locating this character’s body parts.");
       return;
     }
 
@@ -199,9 +277,8 @@ async function generate(job, image, filename) {
       await waitTask(job, rigId, 64, 77);
     } catch (error) {
       if (!guidedFamily) throw error;
-      job.rigAnalysis = createRigAnalysis(job.bodyType, false);
       job.error = error instanceof Error ? error.message : String(error);
-      update(job, "needs_correction", 67, "The automatic rig needs a few corrected body points.");
+      await smartRigFallback(job, images, job.bodyType, "The automatic rig needs a few corrected body points.");
       return;
     }
 
@@ -240,17 +317,34 @@ async function handler(request, response) {
   response.setHeader("access-control-allow-headers", "content-type");
   if (request.method === "OPTIONS") { response.writeHead(204); return response.end(); }
   const url = new URL(request.url, `http://${request.headers.host || "localhost"}`);
-  if (request.method === "GET" && url.pathname === "/health") return send(response, 200, { ok: true, generationConfigured: Boolean(TRIPO_API_KEY) });
+  if (request.method === "GET" && url.pathname === "/health") return send(response, 200, { ok: true, generationConfigured: Boolean(TRIPO_API_KEY), preflightConfigured: Boolean(process.env.OPENAI_API_KEY), smartRigConfigured: Boolean(process.env.OPENAI_API_KEY && BLENDER_BIN) });
+  if (request.method === "POST" && url.pathname === "/v1/preflight") {
+    if (!process.env.OPENAI_API_KEY) return send(response, 503, { error: "The GPT image-quality check is not configured." });
+    if (!allowRequest(request.socket.remoteAddress || "unknown", preflightBuckets, 15)) return send(response, 429, { error: "Image check limit reached. Try again later." });
+    try {
+      const payload = await bodyJson(request);
+      if (!Array.isArray(payload.dataUrls) || payload.dataUrls.length < 1 || payload.dataUrls.length > 3) throw new Error("Choose between one and three images.");
+      payload.dataUrls.forEach(dataImage);
+      return send(response, 200, await analyzeImagePreflight(payload.dataUrls));
+    } catch (error) { return send(response, 400, { error: error instanceof Error ? error.message : String(error) }); }
+  }
   if (request.method === "POST" && url.pathname === "/v1/jobs") {
     if (!TRIPO_API_KEY) return send(response, 503, { error: "Generation service is not configured." });
     if (!allowRequest(request.socket.remoteAddress || "unknown")) return send(response, 429, { error: "Creation limit reached. Try again later." });
     try {
-      const payload = await bodyJson(request); const image = dataImage(payload.dataUrl);
-      const originalName = String(payload.filename || "character").replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 90);
-      const filename = `${originalName.replace(/\.[^.]+$/, "")}.${image.ext}`;
+      const payload = await bodyJson(request);
+      const dataUrls = Array.isArray(payload.dataUrls) ? payload.dataUrls : [payload.dataUrl];
+      if (dataUrls.length < 1 || dataUrls.length > 3) throw new Error("Choose between one and three images.");
+      const images = dataUrls.map(dataImage);
+      const suppliedNames = Array.isArray(payload.filenames) ? payload.filenames : [payload.filename];
+      const filenames = images.map((image, index) => {
+        const originalName = String(suppliedNames[index] || `character-${index + 1}`).replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 90);
+        return `${originalName.replace(/\.[^.]+$/, "")}.${image.ext}`;
+      });
+      const classifiedViews = Array.isArray(payload.views) ? payload.views : [{ index: 0, angle: "front" }];
       const id = randomUUID(); const token = randomBytes(24).toString("hex");
-      const job = { id, token, stage: "uploading", progress: 2, message: "Preparing your image…", createdAt: Date.now(), directory: join(DATA_ROOT, id), cancelled: false };
-      jobs.set(id, job); generate(job, image, filename);
+      const job = { id, token, stage: "uploading", progress: 2, message: "Preparing your images…", createdAt: Date.now(), directory: join(DATA_ROOT, id), cancelled: false };
+      jobs.set(id, job); generate(job, images, filenames, classifiedViews);
       return send(response, 202, { id, token });
     } catch (error) { return send(response, 400, { error: error instanceof Error ? error.message : String(error) }); }
   }

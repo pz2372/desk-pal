@@ -1,8 +1,16 @@
 const HUMANOID_LANDMARKS = [
   ["head", "Top of head"],
   ["pelvis", "Center of hips"],
+  ["left_shoulder", "Left shoulder"],
+  ["right_shoulder", "Right shoulder"],
+  ["left_elbow", "Left elbow"],
+  ["right_elbow", "Right elbow"],
   ["left_hand", "Left hand"],
   ["right_hand", "Right hand"],
+  ["left_hip", "Left hip joint"],
+  ["right_hip", "Right hip joint"],
+  ["left_knee", "Left knee"],
+  ["right_knee", "Right knee"],
   ["left_foot", "Left foot"],
   ["right_foot", "Right foot"],
 ];
@@ -11,15 +19,23 @@ const QUADRUPED_LANDMARKS = [
   ["head", "Center of head"],
   ["chest", "Center of chest"],
   ["pelvis", "Center of hips"],
+  ["front_left_shoulder", "Front left shoulder"],
+  ["front_right_shoulder", "Front right shoulder"],
+  ["front_left_elbow", "Front left elbow"],
+  ["front_right_elbow", "Front right elbow"],
   ["front_left_paw", "Front left paw"],
   ["front_right_paw", "Front right paw"],
+  ["back_left_hip", "Back left hip"],
+  ["back_right_hip", "Back right hip"],
+  ["back_left_knee", "Back left knee"],
+  ["back_right_knee", "Back right knee"],
   ["back_left_paw", "Back left paw"],
   ["back_right_paw", "Back right paw"],
 ];
 
 export const RIG_TEMPLATES = Object.freeze({
   humanoid: Object.freeze({
-    id: "desk_pal_humanoid_v1",
+    id: "desk_pal_humanoid_v2",
     family: "humanoid",
     bones: ["root", "pelvis", "spine", "chest", "neck", "head", "upper_arm_l", "forearm_l", "hand_l", "upper_arm_r", "forearm_r", "hand_r", "thigh_l", "shin_l", "foot_l", "thigh_r", "shin_r", "foot_r"],
     landmarks: HUMANOID_LANDMARKS,
@@ -27,7 +43,7 @@ export const RIG_TEMPLATES = Object.freeze({
     anatomy: { legs: 2, arms: 2, wings: 0, tails: 0, heads: 1 },
   }),
   quadruped: Object.freeze({
-    id: "desk_pal_quadruped_v1",
+    id: "desk_pal_quadruped_v2",
     family: "quadruped",
     bones: ["root", "pelvis", "spine", "chest", "neck", "head", "front_upper_l", "front_lower_l", "front_paw_l", "front_upper_r", "front_lower_r", "front_paw_r", "back_upper_l", "back_lower_l", "back_paw_l", "back_upper_r", "back_lower_r", "back_paw_r"],
     landmarks: QUADRUPED_LANDMARKS,
@@ -81,4 +97,27 @@ export function validateRigCorrections(payload) {
     return { ...landmark, position: correction.position.map(Number), confidence: 1, source: "user" };
   });
   return { ...guide, status: "corrected", confidence: 1, landmarks };
+}
+
+export const SMART_RIG_CONFIDENCE = 0.72;
+
+export function mergeSmartRigAnalysis(vision, projected, fallbackFamily = "humanoid") {
+  const family = ["humanoid", "quadruped"].includes(vision?.family) ? vision.family : fallbackFamily;
+  const guide = createRigAnalysis(family === "quadruped" ? "quadruped" : "biped", false, {
+    family,
+    hasTail: Boolean(vision?.hasTail),
+    hasWings: Boolean(vision?.hasWings),
+  });
+  const visionPoints = new Map((Array.isArray(vision?.landmarks) ? vision.landmarks : []).map((point) => [point.name, point]));
+  const projectedPoints = new Map((Array.isArray(projected?.landmarks) ? projected.landmarks : []).map((point) => [point.name, point.position]));
+  const landmarks = guide.landmarks.map((landmark) => {
+    const detected = visionPoints.get(landmark.name);
+    const position = projectedPoints.get(landmark.name);
+    const confidence = Number(detected?.confidence || 0);
+    const usable = Boolean(detected?.visible && confidence >= SMART_RIG_CONFIDENCE && validPoint(position));
+    return { ...landmark, position: usable ? position.map(Number) : undefined, confidence, source: "inferred" };
+  });
+  const complete = landmarks.every((landmark) => !landmark.required || Boolean(landmark.position));
+  const confidence = landmarks.length ? landmarks.reduce((sum, landmark) => sum + landmark.confidence, 0) / landmarks.length : 0;
+  return { ...guide, status: complete ? "corrected" : "needs_correction", confidence, landmarks };
 }

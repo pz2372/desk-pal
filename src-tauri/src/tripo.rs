@@ -1,6 +1,6 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
 use crate::{app_state::{app_data_dir, mutate}, models::{BodyType, GenerationStage, RigAnalysis}};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{path::Path, sync::atomic::Ordering, time::Duration};
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -33,8 +33,34 @@ struct RemoteJob {
 #[derive(Deserialize)]
 struct ErrorResponse { error: Option<String> }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreflightImage {
+    pub index: usize,
+    pub angle: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreflightIssue {
+    pub r#type: String,
+    pub image_indexes: Vec<usize>,
+    pub explanation: String,
+    pub suggestion: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreflightResult {
+    pub passed: bool,
+    pub summary: String,
+    pub images: Vec<PreflightImage>,
+    pub issues: Vec<PreflightIssue>,
+}
+
 fn stage(value: &str) -> GenerationStage {
-    match value { "uploading" => GenerationStage::Uploading, "generating" => GenerationStage::Generating, "rig_check" => GenerationStage::RigCheck, "needs_correction" => GenerationStage::NeedsCorrection, "rigging" => GenerationStage::Rigging, "animating" => GenerationStage::Animating, "downloading" => GenerationStage::Downloading, "completed" => GenerationStage::Completed, "cancelled" => GenerationStage::Cancelled, _ => GenerationStage::Failed }
+    match value { "uploading" => GenerationStage::Uploading, "generating" => GenerationStage::Generating, "rig_check" => GenerationStage::RigCheck, "analyzing" => GenerationStage::Analyzing, "needs_correction" => GenerationStage::NeedsCorrection, "rigging" => GenerationStage::Rigging, "animating" => GenerationStage::Animating, "downloading" => GenerationStage::Downloading, "completed" => GenerationStage::Completed, "cancelled" => GenerationStage::Cancelled, _ => GenerationStage::Failed }
 }
 
 fn body_type(value: &str) -> BodyType {
@@ -62,8 +88,17 @@ async fn download_model(client: &reqwest::Client, url: String, target: &Path) ->
     Ok(())
 }
 
-pub async fn run(app: AppHandle, generation_id: String, data_url: String, filename: String) {
-    if let Err(error) = run_inner(&app, &generation_id, &data_url, &filename).await {
+pub async fn preflight(data_urls: Vec<String>) -> Result<PreflightResult, String> {
+    if data_urls.is_empty() || data_urls.len() > 3 { return Err("Choose between one and three images.".into()); }
+    let root = server_root();
+    let client = reqwest::Client::builder().timeout(Duration::from_secs(130)).build().map_err(|e| e.to_string())?;
+    let response = client.post(format!("{root}/v1/preflight")).json(&serde_json::json!({ "dataUrls": data_urls })).send().await.map_err(|e| format!("Could not reach the Desk Pal image check: {e}"))?;
+    if !response.status().is_success() { return Err(response_error(response).await); }
+    response.json::<PreflightResult>().await.map_err(|e| format!("The image check returned invalid results: {e}"))
+}
+
+pub async fn run(app: AppHandle, generation_id: String, data_urls: Vec<String>, filenames: Vec<String>, views: Vec<PreflightImage>) {
+    if let Err(error) = run_inner(&app, &generation_id, &data_urls, &filenames, &views).await {
         let cancelled = app.state::<crate::app_state::RuntimeState>().cancel_generation.load(Ordering::Relaxed);
         let _ = mutate(&app, |value| {
             if value.generation.id.as_deref() == Some(&generation_id) {
@@ -76,10 +111,10 @@ pub async fn run(app: AppHandle, generation_id: String, data_url: String, filena
     }
 }
 
-async fn run_inner(app: &AppHandle, generation_id: &str, data_url: &str, filename: &str) -> Result<(), String> {
+async fn run_inner(app: &AppHandle, generation_id: &str, data_urls: &[String], filenames: &[String], views: &[PreflightImage]) -> Result<(), String> {
     let root = server_root();
     let client = reqwest::Client::builder().timeout(Duration::from_secs(100)).build().map_err(|e| e.to_string())?;
-    let response = client.post(format!("{root}/v1/jobs")).json(&serde_json::json!({ "dataUrl": data_url, "filename": filename })).send().await.map_err(|e| format!("Could not reach the Desk Pal generation service: {e}"))?;
+    let response = client.post(format!("{root}/v1/jobs")).json(&serde_json::json!({ "dataUrls": data_urls, "filenames": filenames, "views": views })).send().await.map_err(|e| format!("Could not reach the Desk Pal generation service: {e}"))?;
     if !response.status().is_success() { return Err(response_error(response).await); }
     let created = response.json::<CreatedJob>().await.map_err(|e| format!("The generation service returned an invalid job: {e}"))?;
     mutate(app, |value| { if value.generation.id.as_deref() == Some(generation_id) { value.generation.task_id = Some(created.id.clone()); value.generation.task_token = Some(created.token.clone()); } })?;
@@ -220,4 +255,5 @@ mod tests {
     #[test] fn accepts_supported_data_uri() { let (bytes, ext) = parse_data_url("data:image/png;base64,aGVsbG8=").unwrap(); assert_eq!(bytes, b"hello"); assert_eq!(ext, "png"); }
     #[test] fn rejects_unknown_data_uri() { assert!(parse_data_url("data:image/gif;base64,aGVsbG8=").is_err()); }
     #[test] fn maps_manual_rigging_stage() { assert!(matches!(stage("needs_correction"), GenerationStage::NeedsCorrection)); }
+    #[test] fn maps_gpt_anatomy_stage() { assert!(matches!(stage("analyzing"), GenerationStage::Analyzing)); }
 }

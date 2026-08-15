@@ -118,12 +118,19 @@ fn save_widget_position(app: AppHandle, x: f64, y: f64) -> Result<(), String> {
 }
 
 #[tauri::command(rename_all = "camelCase")]
-fn start_generation(app: AppHandle, state: State<'_, RuntimeState>, data_url: String, filename: String) -> Result<String, String> {
-    if data_url.len() > 28_000_000 { return Err("The selected image is too large.".into()); }
-    let safe_name: String = filename.chars().filter(|c| c.is_ascii_alphanumeric() || ['.', '-', '_'].contains(c)).take(100).collect();
-    if safe_name.is_empty() { return Err("The selected filename is invalid.".into()); }
+async fn preflight_images(data_urls: Vec<String>) -> Result<tripo::PreflightResult, String> {
+    tripo::preflight(data_urls).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn start_generation(app: AppHandle, state: State<'_, RuntimeState>, data_urls: Vec<String>, filenames: Vec<String>, views: Vec<tripo::PreflightImage>) -> Result<String, String> {
+    if data_urls.is_empty() || data_urls.len() > 3 || data_urls.len() != filenames.len() { return Err("Choose between one and three valid images.".into()); }
+    if data_urls.iter().map(String::len).sum::<usize>() > 84_000_000 { return Err("The selected images are too large together.".into()); }
+    let safe_names: Vec<String> = filenames.iter().map(|filename| filename.chars().filter(|c| c.is_ascii_alphanumeric() || ['.', '-', '_'].contains(c)).take(100).collect()).collect();
+    if safe_names.iter().any(String::is_empty) { return Err("A selected filename is invalid.".into()); }
     let id = uuid::Uuid::new_v4().to_string();
-    let (bytes, ext) = tripo::parse_data_url(&data_url)?;
+    let parsed = data_urls.iter().map(|data_url| tripo::parse_data_url(data_url)).collect::<Result<Vec<_>, _>>()?;
+    let (bytes, ext) = parsed.into_iter().next().ok_or("Choose an image first.")?;
     let candidate_dir = app_data_dir(&app)?.join("candidate").join(&id);
     fs::create_dir_all(&candidate_dir).map_err(|e| e.to_string())?;
     let source_path = candidate_dir.join(format!("source.{ext}"));
@@ -142,7 +149,7 @@ fn start_generation(app: AppHandle, state: State<'_, RuntimeState>, data_url: St
     })?;
     let task_app = app.clone();
     let task_id = id.clone();
-    tauri::async_runtime::spawn(async move { tripo::run(task_app, task_id, data_url, safe_name).await; });
+    tauri::async_runtime::spawn(async move { tripo::run(task_app, task_id, data_urls, safe_names, views).await; });
     Ok(id)
 }
 
@@ -475,7 +482,7 @@ pub fn run() {
         .on_window_event(|window, event| {
             if window.label() == "setup" { if let WindowEvent::CloseRequested { api, .. } = event { api.prevent_close(); let _ = window.hide(); } }
         })
-        .invoke_handler(tauri::generate_handler![get_app_snapshot, get_pet_snapshot, select_pet, save_widget_position, start_generation, cancel_generation, use_image_candidate, use_model_candidate, submit_rig_corrections, activate_pet, delete_pet, discard_pet_candidate, set_paused, set_overlay_mode, set_cursor_passthrough, set_launch_on_startup, ensure_local_model, send_chat, clear_conversation])
+        .invoke_handler(tauri::generate_handler![get_app_snapshot, get_pet_snapshot, select_pet, save_widget_position, preflight_images, start_generation, cancel_generation, use_image_candidate, use_model_candidate, submit_rig_corrections, activate_pet, delete_pet, discard_pet_candidate, set_paused, set_overlay_mode, set_cursor_passthrough, set_launch_on_startup, ensure_local_model, send_chat, clear_conversation])
         .run(tauri::generate_context!())
         .expect("error while running Desk Pal");
 }
