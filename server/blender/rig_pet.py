@@ -118,30 +118,24 @@ def add_extras(edit_bones, points, chest_parent, root_parent):
             add_bone(edit_bones, f"wing_{side[0]}_02", middle, points[name], first)
 
 
-def distance_to_bone(point, bone):
-    start, end = bone.head_local, bone.tail_local
-    segment = end - start
-    length_squared = segment.length_squared
-    if length_squared < 0.00000001:
-        return (point - start).length
-    amount = max(0.0, min(1.0, (point - start).dot(segment) / length_squared))
-    return (point - (start + segment * amount)).length
-
-
-def has_usable_weights(meshes, armature):
+def has_usable_weights(meshes, armature, sample_limit=4096):
     deform_names = {bone.name for bone in armature.data.bones if bone.use_deform}
     for mesh in meshes:
         group_names = {group.index: group.name for group in mesh.vertex_groups}
         if not any(modifier.type == "ARMATURE" and modifier.object == armature for modifier in mesh.modifiers):
             return False
-        for vertex in mesh.data.vertices:
+        vertex_count = len(mesh.data.vertices)
+        step = max(1, vertex_count // sample_limit)
+        sampled = range(0, vertex_count, step)
+        for index in sampled:
+            vertex = mesh.data.vertices[index]
             if not any(group_names.get(member.group) in deform_names and member.weight > 0.0001 for member in vertex.groups):
                 return False
     return True
 
 
 def apply_nearest_bone_weights(meshes, armature):
-    """Reliable fallback for meshes where Blender's bone-heat solver fails."""
+    """Batched fallback for meshes where Blender's bone-heat solver is too slow."""
     bones = [bone for bone in armature.data.bones if bone.use_deform]
     if not bones:
         raise RuntimeError("The generated armature has no deform bones")
@@ -156,17 +150,56 @@ def apply_nearest_bone_weights(meshes, armature):
             modifier.object = armature
         mesh.parent = armature
         mesh.matrix_world = world_matrix
-        for vertex in mesh.data.vertices:
-            point = inverse_armature @ (mesh.matrix_world @ vertex.co)
-            nearest = sorted(((distance_to_bone(point, bone), bone) for bone in bones), key=lambda item: item[0])[:2]
-            if len(nearest) == 1 or nearest[0][0] < 0.000001:
-                groups[nearest[0][1].name].add([vertex.index], 1.0, "REPLACE")
-                continue
-            first_weight = 1.0 / max(nearest[0][0], 0.000001)
-            second_weight = 1.0 / max(nearest[1][0], 0.000001)
-            total = first_weight + second_weight
-            groups[nearest[0][1].name].add([vertex.index], first_weight / total, "REPLACE")
-            groups[nearest[1][1].name].add([vertex.index], second_weight / total, "REPLACE")
+        vertex_count = len(mesh.data.vertices)
+        coordinates = np.empty(vertex_count * 3, dtype=np.float64)
+        mesh.data.vertices.foreach_get("co", coordinates)
+        coordinates = coordinates.reshape((-1, 3))
+        transform = np.asarray(inverse_armature @ mesh.matrix_world, dtype=np.float64)
+        homogeneous = np.column_stack((coordinates, np.ones(vertex_count, dtype=np.float64)))
+        points = (homogeneous @ transform.T)[:, :3]
+
+        best_distance = np.full(vertex_count, np.inf, dtype=np.float64)
+        second_distance = np.full(vertex_count, np.inf, dtype=np.float64)
+        best_bone = np.full(vertex_count, -1, dtype=np.int16)
+        second_bone = np.full(vertex_count, -1, dtype=np.int16)
+        for bone_index, bone in enumerate(bones):
+            start = np.asarray(bone.head_local, dtype=np.float64)
+            end = np.asarray(bone.tail_local, dtype=np.float64)
+            segment = end - start
+            length_squared = max(float(np.dot(segment, segment)), 0.00000001)
+            amount = np.clip(((points - start) @ segment) / length_squared, 0.0, 1.0)
+            distance = np.linalg.norm(points - (start + amount[:, None] * segment), axis=1)
+            nearer = distance < best_distance
+            second_nearer = (~nearer) & (distance < second_distance)
+            second_distance = np.where(nearer, best_distance, np.where(second_nearer, distance, second_distance))
+            second_bone = np.where(nearer, best_bone, np.where(second_nearer, bone_index, second_bone))
+            best_distance = np.where(nearer, distance, best_distance)
+            best_bone = np.where(nearer, bone_index, best_bone)
+
+        first_inverse = 1.0 / np.maximum(best_distance, 0.000001)
+        second_inverse = 1.0 / np.maximum(second_distance, 0.000001)
+        first_weight = first_inverse / (first_inverse + second_inverse)
+        second_weight = 1.0 - first_weight
+        exact = best_distance < 0.000001
+        first_weight[exact] = 1.0
+        second_weight[exact] = 0.0
+
+        # Quantization turns hundreds of thousands of individual Blender API
+        # calls into a small set of batched assignments with negligible visual
+        # difference for a tiny desktop pet.
+        levels = 32
+        first_weight = np.round(first_weight * levels) / levels
+        second_weight = 1.0 - first_weight
+        for bone_index, bone in enumerate(bones):
+            group = groups[bone.name]
+            for bone_map, weights in ((best_bone, first_weight), (second_bone, second_weight)):
+                selected = bone_map == bone_index
+                for weight in np.unique(weights[selected]):
+                    if weight <= 0.0:
+                        continue
+                    indices = np.flatnonzero(selected & (weights == weight)).astype(np.int32).tolist()
+                    if indices:
+                        group.add(indices, float(weight), "REPLACE")
 
 
 def reset_pose(armature):
@@ -274,10 +307,14 @@ def main():
     armature.select_set(True)
     bpy.context.view_layer.objects.active = armature
     automatic_weight_error = None
-    try:
-        bpy.ops.object.parent_set(type="ARMATURE_AUTO")
-    except RuntimeError as error:
-        automatic_weight_error = error
+    vertex_count = sum(len(mesh.data.vertices) for mesh in meshes)
+    if vertex_count <= 200000:
+        try:
+            bpy.ops.object.parent_set(type="ARMATURE_AUTO")
+        except RuntimeError as error:
+            automatic_weight_error = error
+    else:
+        automatic_weight_error = RuntimeError(f"mesh has {vertex_count} vertices; using batched weights")
     if automatic_weight_error or not has_usable_weights(meshes, armature):
         print(f"Automatic skin weights unavailable; using nearest-bone fallback: {automatic_weight_error or 'incomplete weights'}")
         apply_nearest_bone_weights(meshes, armature)
