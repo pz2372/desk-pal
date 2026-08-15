@@ -42,8 +42,8 @@ Blender path and start command; Render supplies `PORT` automatically. Blender is
 memory intensive, so a service with at least 2 GB RAM is recommended for real
 generation jobs.
 
-The desktop app defaults to the deployed Desk Pal service at
-`https://desk-pal.onrender.com` in both development and packaged release builds.
+The desktop app defaults to the deployed Blender-enabled Desk Pal service at
+`https://desk-pal-blender.onrender.com` in both development and packaged release builds.
 To point a development run at this local server instead, use:
 
 ```bash

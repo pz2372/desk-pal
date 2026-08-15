@@ -9,7 +9,7 @@ fn server_root() -> String {
         .ok()
         .or_else(|| option_env!("DESK_PAL_SERVER_URL").map(str::to_string))
         .or_else(|| option_env!("NOCTURNE_SERVER_URL").map(str::to_string))
-        .unwrap_or_else(|| "https://desk-pal.onrender.com".into())
+        .unwrap_or_else(|| "https://desk-pal-blender.onrender.com".into())
         .trim_end_matches('/')
         .to_string()
 }
