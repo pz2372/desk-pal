@@ -152,8 +152,9 @@ async function runBlender(job, script, args, label, timeoutMs = 10 * 60 * 1000) 
       clearTimeout(timeout); job.blenderProcess = undefined;
       if (code === 0) resolve();
       else {
-        const lines = diagnostics.trim().split("\n").map((line) => line.trim()).filter(Boolean);
-        const useful = lines.filter((line) => !/^Blender quit/i.test(line)).slice(-6).join(" | ");
+        const tracebackAt = diagnostics.lastIndexOf("Traceback (most recent call last):");
+        const relevant = tracebackAt >= 0 ? diagnostics.slice(tracebackAt) : diagnostics;
+        const useful = relevant.trim().slice(-6_000).replaceAll("\n", " | ");
         reject(new Error(`${label} failed${useful ? `: ${useful}` : "."}`));
       }
     });
