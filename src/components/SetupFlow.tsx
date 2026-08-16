@@ -5,7 +5,7 @@ import { isTauri } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { AppSnapshot, Personality, PetConfig, PreflightIssue, RigAnalysis, RigFamily } from "../types";
 import { EMPTY_SNAPSHOT } from "../types";
-import { activatePet, assetUrl, cancelGeneration, deletePet, discardPetCandidate, getSnapshot, preflightImages, recoverGeneration, retryAnimation, retryRigging, selectPet, startGeneration, submitRigCorrections, useImageCandidate, useModelCandidate } from "../lib/native";
+import { activatePet, assetUrl, cancelGeneration, deletePet, getSnapshot, preflightImages, recoverGeneration, retryAnimation, retryRigging, selectPet, startGeneration, submitRigCorrections, useImageCandidate, useModelCandidate } from "../lib/native";
 import { fileAsDataUrl, validateImage } from "../lib/validation";
 import { createCorrectionGuide, firstMissingLandmark } from "../lib/rigging";
 import { ModelStage } from "./ModelStage";
@@ -218,10 +218,17 @@ export function SetupFlow() {
     setConfig(newPetConfig()); clearSelectedImages(); setError(undefined); setRigGuide(undefined); setActiveLandmark(undefined); setScreen("onboarding"); setStep(1);
   }
 
+  const hasExistingCreation = Boolean(snapshot.generation.id && snapshot.generation.stage !== "idle");
+
+  function openCreation() {
+    if (!hasExistingCreation) return createNewPet();
+    setError(undefined); setScreen("onboarding");
+    setStep(snapshot.generation.stage === "completed" ? 3 : 2);
+  }
+
   async function returnToControls() {
     setBusy(true); setError(undefined);
     try {
-      await discardPetCandidate();
       const latest = await getSnapshot();
       setSnapshot(latest); if (latest.pet) setConfig(latest.pet);
       clearSelectedImages(); setControlTab("pet"); setScreen("controls");
@@ -239,7 +246,7 @@ export function SetupFlow() {
     <div className="window-drag-region" data-tauri-drag-region onMouseDown={startWindowDrag} />
     <section className="setup-card">
       <aside className="setup-aside">
-        {screen === "controls" ? <><div><p className="eyebrow">PET CONTROL CENTER</p><h1>Make Desk Pal<br /><em>yours.</em></h1><p className="lede">Choose the active pet that appears on your desktop, then adjust its personality and behavior.</p></div><div className="pet-list">{snapshot.pets.map((pet) => <button key={pet.id} className={`pet-profile-button ${snapshot.selectedPetId === pet.id ? "active" : ""}`} onClick={() => choosePet(pet.id)}><span className="pet-profile-image"><img src={assetUrl(pet.asset.sourceImagePath)} alt={pet.config.name || "Pet"} /></span><span><strong>{pet.config.name || "Your pet"}</strong><small>{snapshot.selectedPetId === pet.id ? "Active pet" : pet.asset.modelPath ? "3D pet" : "Image pet"}</small></span></button>)}<button className="create-pet-button" onClick={createNewPet}><ImagePlus /> Create New Pet</button></div></> : <><div><p className="eyebrow">YOUR DESKTOP COMPANION</p><h1>Bring a character<br />to <em>life.</em></h1><p className="lede">Your images become a tiny 3D companion that lives quietly at the edge of your screen.</p></div><div className="onboarding-navigation">{snapshot.pets.length > 0 && <button className="return-controls-button" disabled={busy} onClick={returnToControls}><ChevronLeft /> Back to Pet Controls</button>}<ol className="step-list">{["Welcome", "Choose images", "Create model", "Rig & preview", "Personality"].map((label, index) => <li className={index === step ? "active" : index < step ? "complete" : ""} key={label}><span>{index < step ? <Check size={13} /> : index + 1}</span>{label}</li>)}</ol></div></>}
+        {screen === "controls" ? <><div><p className="eyebrow">PET CONTROL CENTER</p><h1>Make Desk Pal<br /><em>yours.</em></h1><p className="lede">Choose the active pet that appears on your desktop, then adjust its personality and behavior.</p></div><div className="pet-list">{snapshot.pets.map((pet) => <button key={pet.id} className={`pet-profile-button ${snapshot.selectedPetId === pet.id ? "active" : ""}`} onClick={() => choosePet(pet.id)}><span className="pet-profile-image"><img src={assetUrl(pet.asset.sourceImagePath)} alt={pet.config.name || "Pet"} /></span><span><strong>{pet.config.name || "Your pet"}</strong><small>{snapshot.selectedPetId === pet.id ? "Active pet" : pet.asset.modelPath ? "3D pet" : "Image pet"}</small></span></button>)}<button className="create-pet-button" onClick={openCreation}>{hasExistingCreation ? <><RefreshCcw /> Resume Creation</> : <><ImagePlus /> Create New Pet</>}</button></div></> : <><div><p className="eyebrow">YOUR DESKTOP COMPANION</p><h1>Bring a character<br />to <em>life.</em></h1><p className="lede">Your images become a tiny 3D companion that lives quietly at the edge of your screen.</p></div><div className="onboarding-navigation">{snapshot.pets.length > 0 && <button className="return-controls-button" disabled={busy} onClick={returnToControls}><ChevronLeft /> Back to Pet Controls</button>}<ol className="step-list">{["Welcome", "Choose images", "Create model", "Rig & preview", "Personality"].map((label, index) => <li className={index === step ? "active" : index < step ? "complete" : ""} key={label}><span>{index < step ? <Check size={13} /> : index + 1}</span>{label}</li>)}</ol></div></>}
         <p className="privacy-note"><ShieldCheck size={16} /> Your chat and pet stay on this computer.</p>
         {screen === "controls" && <button className={`account-nav-button ${controlTab === "account" ? "active" : ""}`} onClick={() => setControlTab("account")}><CircleUserRound /><span><strong>Account</strong></span></button>}
       </aside>
