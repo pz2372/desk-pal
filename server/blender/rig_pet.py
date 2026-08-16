@@ -113,8 +113,9 @@ def add_extras(edit_bones, points, chest_parent, root_parent):
         add_bone(edit_bones, "tail", points["tail_base"], points["tail_tip"], root_parent)
     for side in ("left", "right"):
         name = f"{side}_wing_tip"
-        if name in points:
-            root = chest_parent.tail
+        root_name = f"{side}_wing_root"
+        if name in points and root_name in points:
+            root = points[root_name]
             middle = lerp(root, points[name], 0.52)
             first = add_bone(edit_bones, f"wing_{side[0]}_01", root, middle, chest_parent)
             add_bone(edit_bones, f"wing_{side[0]}_02", middle, points[name], first)

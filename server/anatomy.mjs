@@ -6,7 +6,7 @@ const LANDMARKS = [
   "left_hip", "right_hip", "left_knee", "right_knee", "left_foot", "right_foot",
   "front_left_shoulder", "front_right_shoulder", "front_left_elbow", "front_right_elbow", "front_left_paw", "front_right_paw",
   "back_left_hip", "back_right_hip", "back_left_knee", "back_right_knee", "back_left_paw", "back_right_paw",
-  "tail_base", "tail_tip", "left_wing_tip", "right_wing_tip",
+  "tail_base", "tail_tip", "left_wing_root", "right_wing_root", "left_wing_tip", "right_wing_tip",
 ];
 
 export const ANATOMY_SCHEMA = {
@@ -33,10 +33,13 @@ INPUT CONTRACT
 - Original images are semantic references only. Every returned x/y coordinate MUST refer to one labeled GLB render.
 
 BODY CONTRACT
+- First identify the character, creature, or closest known design when possible. Use your learned knowledge of that identity as a strong anatomical prior, but never as the final decision.
+- Resolve anatomy in this order: (1) the completed GLB geometry, because Blender must rig what exists; (2) the original images, to interpret ambiguous geometry and intentional effects; (3) learned character/species knowledge, to guide interpretation and detect likely mistakes. State important conflicts in explanation.
+- A known design may be customized or the generated GLB may omit or distort a feature. Override prior knowledge only when the original images or multiple GLB views provide clear contradictory evidence. When evidence remains ambiguous, keep the visual interpretation with lower confidence rather than confidently inventing anatomy.
 - Choose humanoid for an upright creature with two legs and two arm-like forelimbs, including stylized fantasy creatures.
 - Choose quadruped for a creature whose four limbs primarily support locomotion.
 - Choose unsupported only when neither canonical skeleton can reasonably animate the model.
-- Detect anatomy from what is actually present. Do not add wings, tails, arms, or legs merely because a known species normally has them.
+- Distinguish deformable anatomy from fire, glow, smoke, hair, clothing, props, and accessories. Effects attached to a tail tip remain effects and must never become wings or independent limbs.
 - Use the character's anatomical left and right, never the viewer's left and right.
 
 LANDMARK CONTRACT
@@ -50,7 +53,8 @@ LANDMARK CONTRACT
 Return every required landmark exactly once.
 Humanoid: head (top/center of skull), pelvis (center between hips), left/right shoulder, elbow, hand/wrist, hip, knee, and foot/ankle.
 Quadruped: head, chest, pelvis, front left/right shoulder, elbow, paw, and back left/right hip, knee, paw.
-If a tail exists, add tail_base at its attachment to the body and tail_tip at the end of its deformable geometry. If wings actually exist, add left_wing_tip and right_wing_tip. Do not invent extra landmarks.`;
+If a tail exists in the GLB, add tail_base at its attachment to the body and tail_tip at the end of its deformable geometry; exclude flame, smoke, or another visual effect from the deformable tail endpoint. Set hasTail=true only when both landmarks are returned.
+Set hasWings=true only for a bilateral pair of deformable wings attached to the torso or shoulder/back region. A horn, ear, tail, tail-tip flame, clothing flap, prop, or single unpaired shape is not a wing. For wings return left_wing_root, right_wing_root, left_wing_tip, and right_wing_tip. If all four credible landmarks cannot be supplied, set hasWings=false and return no wing landmarks. Do not invent extra landmarks.`;
 
 function outputText(response) {
   for (const item of response?.output || []) for (const content of item?.content || []) {
@@ -69,7 +73,12 @@ export function validateAnatomyResult(value) {
     seen.add(point.name);
     return [point.x, point.y, point.confidence].every(Number.isFinite);
   }).map((point) => ({ ...point, x: Math.max(0, Math.min(1, point.x)), y: Math.max(0, Math.min(1, point.y)), confidence: Math.max(0, Math.min(1, point.confidence)), visible: Boolean(point.visible), explanation: String(point.explanation || "") }));
-  return { family: value.family, species: String(value.species || "unknown creature"), hasTail: Boolean(value.hasTail), hasWings: Boolean(value.hasWings), confidence: Math.max(0, Math.min(1, Number(value.confidence) || 0)), explanation: String(value.explanation || ""), landmarks };
+  const names = new Set(landmarks.map((point) => point.name));
+  const hasTail = Boolean(value.hasTail) && ["tail_base", "tail_tip"].every((name) => names.has(name));
+  const wingNames = ["left_wing_root", "right_wing_root", "left_wing_tip", "right_wing_tip"];
+  const hasWings = Boolean(value.hasWings) && wingNames.every((name) => names.has(name));
+  const filteredLandmarks = landmarks.filter((point) => (hasTail || !point.name.startsWith("tail_")) && (hasWings || !point.name.includes("wing_")));
+  return { family: value.family, species: String(value.species || "unknown creature"), hasTail, hasWings, confidence: Math.max(0, Math.min(1, Number(value.confidence) || 0)), explanation: String(value.explanation || ""), landmarks: filteredLandmarks };
 }
 
 export async function analyzeModelAnatomy(originalImages, renders, geometry, options = {}) {
@@ -77,7 +86,7 @@ export async function analyzeModelAnatomy(originalImages, renders, geometry, opt
   if (!Array.isArray(renders) || renders.length !== VIEWS.length || VIEWS.some((name) => !renders.some((render) => render?.name === name && typeof render?.dataUrl === "string"))) throw new Error("GPT anatomy analysis requires all six labeled GLB renders.");
   const apiKey = options.apiKey || process.env.OPENAI_API_KEY;
   if (!apiKey) throw new Error("GPT anatomy analysis is not configured.");
-  const content = [{ type: "input_text", text: `Initial image-only anatomy profile: ${JSON.stringify(options.initialProfile || null)}\nGeometry summary: ${JSON.stringify(geometry)}\nThe original images come first, followed by six labeled GLB renders. Preserve accurate body-family and appendage findings from the initial profile, but correct them when the actual GLB clearly differs. Place all coordinates on the GLB renders only.` }];
+  const content = [{ type: "input_text", text: `Initial image-only anatomy profile: ${JSON.stringify(options.initialProfile || null)}\nGeometry summary: ${JSON.stringify(geometry)}\nThe original images come first, followed by six labeled GLB renders. Identify a known character or creature when possible and use that knowledge to guide interpretation, especially when separating anatomy from effects or accessories. Knowledge is a prior, not the final answer: preserve accurate findings from the initial profile, compare them with every source image, and let clear evidence from multiple GLB views determine the geometry Blender receives. Explain meaningful conflicts. Place all coordinates on the GLB renders only.` }];
   originalImages.forEach((imageUrl, index) => { content.push({ type: "input_text", text: `Original reference ${index + 1}:` }, { type: "input_image", image_url: imageUrl, detail: "high" }); });
   renders.forEach((render) => { content.push({ type: "input_text", text: `GLB render view=${render.name}:` }, { type: "input_image", image_url: render.dataUrl, detail: "high" }); });
   let response;

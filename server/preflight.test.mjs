@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { analyzeImagePreflight, validateInitialAnatomy, validatePreflightResult } from "./preflight.mjs";
 
-const anatomy = { family: "humanoid", species: "stylized creature", hasTail: true, hasWings: false, confidence: 0.9, explanation: "Upright biped", landmarks: [{ name: "head", imageIndex: 0, x: 0.5, y: 0.1, confidence: 0.9, visible: true, explanation: "Clear" }] };
+const imagePoint = (name, x, y) => ({ name, imageIndex: 0, x, y, confidence: 0.9, visible: true, explanation: "Clear" });
+const anatomy = { family: "humanoid", species: "stylized creature", hasTail: true, hasWings: false, confidence: 0.9, explanation: "Upright biped", landmarks: [imagePoint("head", 0.5, 0.1), imagePoint("tail_base", 0.6, 0.65), imagePoint("tail_tip", 0.85, 0.55)] };
 
 describe("image preflight", () => {
   it("blocks generation and preserves actionable issues", () => {
@@ -47,5 +48,12 @@ describe("image preflight", () => {
     }, 1);
     expect(value.confidence).toBe(1);
     expect(value.landmarks).toEqual([anatomy.landmarks[0]]);
+    expect(value.hasTail).toBe(false);
+  });
+
+  it("does not pass an isolated effect shape through as wings", () => {
+    const value = validateInitialAnatomy({ ...anatomy, hasWings: true, landmarks: [...anatomy.landmarks, imagePoint("left_wing_tip", 0.8, 0.4)] }, 1);
+    expect(value.hasWings).toBe(false);
+    expect(value.landmarks.some((point) => point.name.includes("wing"))).toBe(false);
   });
 });

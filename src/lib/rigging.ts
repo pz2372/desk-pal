@@ -30,7 +30,7 @@ export function createCorrectionGuide(previous: RigAnalysis | undefined, family:
   const saved = new Map((previous?.landmarks ?? []).map((landmark) => [landmark.name, landmark]));
   const extras: Array<[string, string]> = [
     ...(hasTail ? [["tail_base", "Base of tail"], ["tail_tip", "Tip of tail"]] as Array<[string, string]> : []),
-    ...(hasWings ? [["left_wing_tip", "Left wing tip"], ["right_wing_tip", "Right wing tip"]] as Array<[string, string]> : []),
+    ...(hasWings ? [["left_wing_root", "Left wing root"], ["right_wing_root", "Right wing root"], ["left_wing_tip", "Left wing tip"], ["right_wing_tip", "Right wing tip"]] as Array<[string, string]> : []),
   ];
   const landmarks: RigLandmark[] = [...LANDMARKS[family], ...extras].map(([name, label]) => ({
     name, label, position: saved.get(name)?.position, confidence: saved.get(name)?.confidence ?? 0, source: saved.get(name)?.source ?? "user", required: true,

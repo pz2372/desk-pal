@@ -15,7 +15,7 @@ const IMAGE_LANDMARKS = [
   "left_hip", "right_hip", "left_knee", "right_knee", "left_foot", "right_foot",
   "front_left_shoulder", "front_right_shoulder", "front_left_elbow", "front_right_elbow", "front_left_paw", "front_right_paw",
   "back_left_hip", "back_right_hip", "back_left_knee", "back_right_knee", "back_left_paw", "back_right_paw",
-  "tail_base", "tail_tip", "left_wing_tip", "right_wing_tip",
+  "tail_base", "tail_tip", "left_wing_root", "right_wing_root", "left_wing_tip", "right_wing_tip",
 ];
 
 export const PREFLIGHT_SCHEMA = {
@@ -86,7 +86,7 @@ Report an issue only when it is reasonably evident. Check for exactly these fail
 
 Image 1 should be a front or three-quarter-front full-body view. Extra images should add a side and back/opposite-three-quarter view. All views must show the same character. Do not reject an intentional stylized design merely because it is unusual. Do not claim a body part is missing unless the other visual evidence indicates the character should have it. Explain each problem in plain language and give one concrete replacement-image instruction. Return no issues when the images are suitable for 3D generation and rigging.
 
-Also create the initial anatomy plan before any 3D or Blender work. Classify an upright two-leg/two-arm creature as humanoid and a four-load-bearing-limb creature as quadruped. Use unsupported only when neither template fits. Detect only anatomy actually shown; never add wings or a tail because a known species usually has them. Use the character's anatomical left and right. Return the same canonical landmarks used for rigging, with coordinates on the clearest ORIGINAL image (x left-to-right, y top-to-bottom, normalized 0..1). Include all expected landmarks once, infer occluded joints using symmetry with lower confidence, and set hasTail/hasWings from visible evidence.`;
+Also create the initial anatomy plan before any 3D or Blender work. First identify the character, creature, or closest known design when possible. Use learned character/species knowledge as a strong prior that guides interpretation, but not as the final authority. Confirm it against the uploaded images, allow custom designs to differ, and explain important conflicts. Classify an upright two-leg/two-arm creature as humanoid and a four-load-bearing-limb creature as quadruped. Use unsupported only when neither template fits. Distinguish deformable anatomy from fire, glow, smoke, hair, clothing, props, and accessories. A tail-tip flame is an effect, not a wing. Use the character's anatomical left and right. Return the same canonical landmarks used for rigging, with coordinates on the clearest ORIGINAL image (x left-to-right, y top-to-bottom, normalized 0..1). Include all expected landmarks once and infer occluded joints using symmetry with lower confidence. Set hasTail=true only with tail_base and tail_tip. Set hasWings=true only for a bilateral pair of deformable wings attached to the torso/back, and then include left/right wing_root and wing_tip landmarks. A single unpaired shape cannot be a wing.`;
 
 function outputText(response) {
   for (const item of response?.output || []) {
@@ -141,7 +141,12 @@ export function validateInitialAnatomy(value, imageCount = 3) {
     x: Math.max(0, Math.min(1, point.x)), y: Math.max(0, Math.min(1, point.y)), confidence: Math.max(0, Math.min(1, point.confidence)),
     visible: Boolean(point.visible), explanation: String(point.explanation || ""),
   }));
-  return { family: value.family, species: String(value.species || "unknown creature"), hasTail: Boolean(value.hasTail), hasWings: Boolean(value.hasWings), confidence: Math.max(0, Math.min(1, Number(value.confidence) || 0)), explanation: String(value.explanation || ""), landmarks };
+  const names = new Set(landmarks.map((point) => point.name));
+  const hasTail = Boolean(value.hasTail) && ["tail_base", "tail_tip"].every((name) => names.has(name));
+  const wingNames = ["left_wing_root", "right_wing_root", "left_wing_tip", "right_wing_tip"];
+  const hasWings = Boolean(value.hasWings) && wingNames.every((name) => names.has(name));
+  const filteredLandmarks = landmarks.filter((point) => (hasTail || !point.name.startsWith("tail_")) && (hasWings || !point.name.includes("wing_")));
+  return { family: value.family, species: String(value.species || "unknown creature"), hasTail, hasWings, confidence: Math.max(0, Math.min(1, Number(value.confidence) || 0)), explanation: String(value.explanation || ""), landmarks: filteredLandmarks };
 }
 
 export async function analyzeImagePreflight(dataUrls, options = {}) {

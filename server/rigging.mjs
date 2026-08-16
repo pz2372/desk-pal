@@ -66,7 +66,7 @@ export function createRigAnalysis(bodyType, riggable, options = {}) {
   const hasWings = Boolean(options.hasWings);
   const extras = [
     ...(hasTail ? [["tail_base", "Base of tail"], ["tail_tip", "Tip of tail"]] : []),
-    ...(hasWings ? [["left_wing_tip", "Left wing tip"], ["right_wing_tip", "Right wing tip"]] : []),
+    ...(hasWings ? [["left_wing_root", "Left wing root"], ["right_wing_root", "Right wing root"], ["left_wing_tip", "Left wing tip"], ["right_wing_tip", "Right wing tip"]] : []),
   ];
   return {
     templateId: template.id,
