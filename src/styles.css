@@ -109,6 +109,8 @@ textarea { resize: none; min-height: 70px; }.text-input:focus, textarea:focus { 
 .personality-panel .text-input { margin-bottom: 22px; }
 .personality-panel .personality-grid { margin-bottom: 23px; }
 .personality-panel textarea { margin-bottom: 22px; }
+.personality-actions { display: grid; grid-template-columns: minmax(150px, .7fr) minmax(0, 1fr); gap: 10px; }
+.personality-actions .ghost-button { width: 100%; }
 .preference-group { display: grid; gap: 4px; margin: 0 0 24px; }
 .personality-panel .switch-row { margin: 0; padding: 10px 0; }
 .pet-profile-button, .account-nav-button { width: 100%; display: flex; align-items: center; gap: 12px; padding: 10px; color: #aaa7b7; text-align: left; border: 1px solid transparent; border-radius: 14px; background: transparent; cursor: pointer; }

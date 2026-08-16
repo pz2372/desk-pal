@@ -35,6 +35,10 @@ applies the reusable `idle`, `walk`, `turn`, `jump`, and `react` library and sav
 `pet.glb`. A rig or animation retry therefore reuses the last successful local
 artifact and never repeats paid Tripo model generation.
 
+New Tripo models use a 200,000-face generation limit. This preserves detailed
+desktop-pet silhouettes while keeping Blender import, skinning, and export
+within the worker's practical memory budget.
+
 During an active creation session, each new job references the previous Render
 job's temporary GLB by its protected job ID and token. The base model therefore
 moves into rigging, and the rigged model into animation, without being uploaded

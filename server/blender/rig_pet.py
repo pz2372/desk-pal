@@ -13,7 +13,7 @@ from mathutils import Vector
 if "bool" not in np.__dict__:
     np.bool = np.bool_
 
-MAX_RIG_TRIANGLES = 180000
+MAX_RIG_TRIANGLES = 200000
 
 
 def arguments():

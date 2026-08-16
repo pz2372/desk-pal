@@ -19,6 +19,7 @@ const rateBuckets = new Map();
 const preflightBuckets = new Map();
 const MAX_BODY = 85 * 1024 * 1024;
 const REQUIRED_PIPELINE_CREDITS = 105;
+const GENERATION_FACE_LIMIT = 200_000;
 const BLENDER_BIN = process.env.BLENDER_BIN || "blender";
 const RIG_SCRIPT = new URL("./blender/rig_pet.py", import.meta.url).pathname;
 const RENDER_SCRIPT = new URL("./blender/render_model_views.py", import.meta.url).pathname;
@@ -349,7 +350,7 @@ async function generate(job, images, filenames, classifiedViews) {
     const generationRequest = uploadedViews.length > 1 && usableViewCount > 1
       ? { type: "multiview_to_model", files: orderedFiles }
       : { type: "image_to_model", file: { type: uploadedViews[0].image.ext, file_token: uploadedViews[0].fileToken } };
-    const generationId = await createTask({ ...generationRequest, model_version: "v3.1-20260211", texture: true, pbr: true, texture_quality: "standard" });
+    const generationId = await createTask({ ...generationRequest, model_version: "v3.1-20260211", face_limit: GENERATION_FACE_LIMIT, texture: true, pbr: true, texture_quality: "standard" });
     job.providerTaskId = generationId;
     const generated = await waitTask(job, generationId, 12, 52);
     const baseModelUrl = outputModelUrl(generated);
