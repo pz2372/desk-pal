@@ -231,16 +231,16 @@ async fn retry_animation(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 fn activate_pet(app: AppHandle, config: PetConfig) -> Result<(), String> {
     if config.name.trim().is_empty() || config.name.chars().count() > 28 { return Err("Pet names must contain 1–28 characters.".into()); }
-    let (is_new, candidate, source, body, rig_analysis, selected_id) = {
+    let (is_new, candidate, source, body, rig_analysis, remote_artifact, selected_id) = {
         let state = app.state::<RuntimeState>();
         let value = state.inner.lock().map_err(|_| "State unavailable")?;
         if !matches!(value.generation.stage, GenerationStage::Completed) && value.selected_pet_id.is_none() { return Err("Finish creating a pet before activating it.".into()); }
         if matches!(value.generation.stage, GenerationStage::Completed) {
-            (true, value.generation.candidate_model_path.clone(), value.generation.candidate_source_path.clone(), value.generation.body_type.clone().unwrap_or_default(), value.generation.rig_analysis.clone(), None)
+            (true, value.generation.candidate_model_path.clone(), value.generation.candidate_source_path.clone(), value.generation.body_type.clone().unwrap_or_default(), value.generation.rig_analysis.clone(), value.generation.remote_artifact_id.clone().zip(value.generation.remote_artifact_token.clone()), None)
         } else {
             let id = value.selected_pet_id.clone().ok_or("No pet is selected")?;
             let pet = value.pets.iter().find(|pet| pet.id == id).ok_or("No pet asset exists")?;
-            (false, pet.asset.model_path.clone(), Some(pet.asset.source_image_path.clone()), pet.asset.body_type.clone(), pet.asset.rig_analysis.clone(), Some(id))
+            (false, pet.asset.model_path.clone(), Some(pet.asset.source_image_path.clone()), pet.asset.body_type.clone(), pet.asset.rig_analysis.clone(), pet.asset.remote_artifact_id.clone().zip(pet.asset.remote_artifact_token.clone()), Some(id))
         }
     };
     if is_new {
@@ -263,7 +263,7 @@ fn activate_pet(app: AppHandle, config: PetConfig) -> Result<(), String> {
             character_profile.capabilities = rig.capabilities.clone();
             character_profile.confidence = rig.confidence;
         }
-        let asset = PetAsset { model_path: active_model_path, source_image_path: image_target.to_string_lossy().into(), body_type: body.clone(), character_profile, rig_analysis, created_at: format!("{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs()) };
+        let asset = PetAsset { model_path: active_model_path, source_image_path: image_target.to_string_lossy().into(), body_type: body.clone(), character_profile, rig_analysis, remote_artifact_id: remote_artifact.as_ref().map(|value| value.0.clone()), remote_artifact_token: remote_artifact.map(|value| value.1), created_at: format!("{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs()) };
         mutate(&app, |state| {
             state.pets.push(PetRecord { id: id.clone(), config: config.clone(), asset, paused: false, visible: true });
             state.selected_pet_id = Some(id.clone());

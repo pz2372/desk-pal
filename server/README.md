@@ -44,11 +44,29 @@ base64-encoded into large JSON requests.
 
 Render is temporary compute, not the pet database. It keeps a processing copy only
 while a job is running and long enough for the desktop to download the result.
-Downloaded artifacts are queued for deletion after 15 minutes; other terminal jobs
-expire after one hour, with a 24-hour maximum for abandoned work. Reference images,
-pet models, rigged models, and final animated pets are not copied into company object
-storage. A private company bucket may later hold only Desk Pal-owned rig templates,
-animation clips, and version manifests shared by all users.
+Downloaded and terminal artifacts expire after one hour, with a 24-hour maximum
+for abandoned work. When private R2
+storage is configured, `base.glb`, `rigged.glb`, and `animated.glb` are also stored
+under one opaque artifact ID so an expired Render job can resume without another
+desktop upload. The desktop stores the artifact ID and a server-signed receipt; it
+never receives R2 credentials or a public bucket URL.
+
+Create a private R2 bucket and a bucket-scoped Object Read & Write API token, then
+add these Render environment variables:
+
+```dotenv
+R2_ACCOUNT_ID=your_cloudflare_account_id
+R2_ACCESS_KEY_ID=your_r2_access_key_id
+R2_SECRET_ACCESS_KEY=your_r2_secret_access_key
+R2_BUCKET=desk-pal-artifacts
+ARTIFACT_SIGNING_SECRET=a_random_64_character_hex_secret
+```
+
+Set an R2 lifecycle rule for the `user-artifacts/` prefix. A 30-day expiration is
+a reasonable prototype default: local pet files remain permanent on the user's
+computer, while R2 exists only to support later rig/animation retries. Company-owned
+rig templates and animation libraries should use a different prefix without this
+short expiration rule.
 
 For Render, deploy the repository root as a **Docker Web Service**. The included
 [`Dockerfile`](../Dockerfile) installs Node and Blender. Configure:
@@ -85,6 +103,5 @@ custom domain.
 
 The prototype server limits each IP to five creation jobs per hour. Production
 deployment should replace its in-memory job registry with a background queue and
-authenticated user quotas. Object storage is needed only for company-owned reusable
-rig/animation library assets, not for user pets. Blender process isolation should
-also be tightened before public use.
+authenticated user quotas. R2 stores retry artifacts, but Blender process isolation
+and a single-concurrency worker queue should still be added before public use.

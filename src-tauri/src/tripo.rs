@@ -17,6 +17,14 @@ fn server_root() -> String {
 #[derive(Deserialize)]
 struct CreatedJob { id: String, token: String }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoteArtifact { id: String, token: String }
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ArtifactUpload { id: String, token: String, chunk_size: usize }
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RemoteJob {
@@ -26,6 +34,7 @@ struct RemoteJob {
     error: Option<String>,
     body_type: Option<String>,
     rig_analysis: Option<RigAnalysis>,
+    artifact: Option<RemoteArtifact>,
     base_model_url: Option<String>,
     model_url: Option<String>,
 }
@@ -98,15 +107,23 @@ async fn download_model(client: &reqwest::Client, url: String, target: &Path) ->
 }
 
 async fn upload_model_artifact(client: &reqwest::Client, root: &str, model: Vec<u8>) -> Result<CreatedJob, String> {
-    let response = client
-        .post(format!("{root}/v1/artifacts"))
-        .header(reqwest::header::CONTENT_TYPE, "model/gltf-binary")
-        .body(model)
-        .send()
-        .await
-        .map_err(|e| format!("Could not upload the saved GLB artifact: {e}"))?;
+    let response = client.post(format!("{root}/v1/artifacts/init")).send().await.map_err(|e| format!("Could not initialize the saved GLB upload: {e}"))?;
     if !response.status().is_success() { return Err(response_error(response).await); }
-    response.json::<CreatedJob>().await.map_err(|e| format!("The artifact service returned invalid data: {e}"))
+    let upload = response.json::<ArtifactUpload>().await.map_err(|e| format!("The artifact service returned invalid upload data: {e}"))?;
+    if upload.chunk_size == 0 || upload.chunk_size > 5 * 1024 * 1024 { return Err("The artifact service returned an invalid chunk size.".into()); }
+    for (index, chunk) in model.chunks(upload.chunk_size).enumerate() {
+        let response = client
+            .put(format!("{root}/v1/artifacts/{}/chunks/{index}?token={}", upload.id, upload.token))
+            .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+            .body(chunk.to_vec())
+            .send()
+            .await
+            .map_err(|e| format!("Could not upload model chunk {}: {e}", index + 1))?;
+        if !response.status().is_success() { return Err(response_error(response).await); }
+    }
+    let response = client.post(format!("{root}/v1/artifacts/{}/complete?token={}", upload.id, upload.token)).send().await.map_err(|e| format!("Could not finalize the saved GLB upload: {e}"))?;
+    if !response.status().is_success() { return Err(response_error(response).await); }
+    response.json::<CreatedJob>().await.map_err(|e| format!("The artifact service returned invalid completion data: {e}"))
 }
 
 async fn create_artifact_job(
@@ -114,21 +131,26 @@ async fn create_artifact_job(
     root: &str,
     endpoint: &str,
     source_job: Option<(String, String)>,
+    r2_artifact: Option<(String, String)>,
     model: Vec<u8>,
     mut payload: serde_json::Value,
 ) -> Result<CreatedJob, String> {
     if let (Some(source), Some(object)) = (source_job.as_ref(), payload.as_object_mut()) {
         object.insert("sourceJob".into(), serde_json::json!({ "id": source.0, "token": source.1 }));
     }
+    if let (Some(artifact), Some(object)) = (r2_artifact.as_ref(), payload.as_object_mut()) {
+        object.insert("r2Artifact".into(), serde_json::json!({ "id": artifact.0, "token": artifact.1 }));
+    }
     let response = client.post(format!("{root}{endpoint}")).json(&payload).send().await.map_err(|e| format!("Could not start the processing job: {e}"))?;
     if response.status().is_success() {
         return response.json::<CreatedJob>().await.map_err(|e| format!("The processing service returned invalid job data: {e}"));
     }
-    if !matches!(response.status().as_u16(), 404 | 409 | 410) { return Err(response_error(response).await); }
+    if !matches!(response.status().as_u16(), 404 | 409 | 410 | 502 | 503 | 504) { return Err(response_error(response).await); }
 
     let artifact = upload_model_artifact(client, root, model).await?;
     if let Some(object) = payload.as_object_mut() {
         object.remove("sourceJob");
+        object.remove("r2Artifact");
         object.insert("modelArtifact".into(), serde_json::json!({ "id": artifact.id, "token": artifact.token }));
     }
     let response = client.post(format!("{root}{endpoint}")).json(&payload).send().await.map_err(|e| format!("Could not start the processing job after uploading the local artifact: {e}"))?;
@@ -195,6 +217,7 @@ async fn run_inner(app: &AppHandle, generation_id: &str, data_urls: &[String], f
                 value.generation.error = job.error.clone();
                 if detected_body.is_some() { value.generation.body_type = detected_body.clone(); }
                 if job.rig_analysis.is_some() { value.generation.rig_analysis = job.rig_analysis.clone(); }
+                if let Some(artifact) = job.artifact.as_ref() { value.generation.remote_artifact_id = Some(artifact.id.clone()); value.generation.remote_artifact_token = Some(artifact.token.clone()); }
             }
         })?;
         publish(app);
@@ -261,6 +284,7 @@ async fn monitor_corrected_job(app: &AppHandle, generation_id: String, task_id: 
             value.generation.message = job.message.clone();
             value.generation.error = job.error.clone();
             if job.rig_analysis.is_some() { value.generation.rig_analysis = job.rig_analysis.clone(); }
+            if let Some(artifact) = job.artifact.as_ref() { value.generation.remote_artifact_id = Some(artifact.id.clone()); value.generation.remote_artifact_token = Some(artifact.token.clone()); }
         })?;
         publish(app);
         match current_stage {
@@ -310,7 +334,7 @@ pub async fn submit_corrections(app: &AppHandle, analysis: RigAnalysis) -> Resul
 }
 
 pub async fn retry_existing_rig(app: &AppHandle, analysis: RigAnalysis) -> Result<RigAnalysis, String> {
-    let (generation_id, model_path, source_path, source_job) = {
+    let (generation_id, model_path, source_path, source_job, r2_artifact) = {
         let state = app.state::<crate::app_state::RuntimeState>();
         let value = state.inner.lock().map_err(|_| "State unavailable")?;
         (
@@ -318,6 +342,7 @@ pub async fn retry_existing_rig(app: &AppHandle, analysis: RigAnalysis) -> Resul
             value.generation.candidate_model_path.clone().ok_or("The generated 3D model is missing")?,
             value.generation.candidate_source_path.clone().ok_or("The source image is missing")?,
             value.generation.task_id.clone().zip(value.generation.task_token.clone()),
+            value.generation.remote_artifact_id.clone().zip(value.generation.remote_artifact_token.clone()),
         )
     };
     let model = tokio::fs::read(&model_path).await.map_err(|e| format!("Could not read the existing 3D model: {e}"))?;
@@ -331,7 +356,7 @@ pub async fn retry_existing_rig(app: &AppHandle, analysis: RigAnalysis) -> Resul
     };
     let root = server_root();
     let client = reqwest::Client::builder().timeout(Duration::from_secs(150)).build().map_err(|e| e.to_string())?;
-    let created = create_artifact_job(&client, &root, "/v1/rig-existing", source_job, model, serde_json::json!({
+    let created = create_artifact_job(&client, &root, "/v1/rig-existing", source_job, r2_artifact, model, serde_json::json!({
         "dataUrls": [format!("data:{mime};base64,{}", STANDARD.encode(source))],
         "rigGuide": {
             "family": analysis.family,
@@ -344,20 +369,21 @@ pub async fn retry_existing_rig(app: &AppHandle, analysis: RigAnalysis) -> Resul
 }
 
 pub async fn start_existing_rig(app: &AppHandle, data_urls: &[String], anatomy: &InitialAnatomyProfile) -> Result<Option<RigAnalysis>, String> {
-    let (generation_id, model_path, source_job) = {
+    let (generation_id, model_path, source_job, r2_artifact) = {
         let state = app.state::<crate::app_state::RuntimeState>();
         let value = state.inner.lock().map_err(|_| "State unavailable")?;
         (
             value.generation.id.clone().ok_or("The local generation is missing")?,
             value.generation.candidate_model_path.clone().ok_or("The saved base model is missing")?,
             value.generation.task_id.clone().zip(value.generation.task_token.clone()),
+            value.generation.remote_artifact_id.clone().zip(value.generation.remote_artifact_token.clone()),
         )
     };
     let model = tokio::fs::read(&model_path).await.map_err(|e| format!("Could not read the saved base model: {e}"))?;
     if model.len() < 20 || model.len() > 60 * 1024 * 1024 || &model[..4] != b"glTF" { return Err("The saved base GLB is invalid or too large.".into()); }
     let root = server_root();
     let client = reqwest::Client::builder().timeout(Duration::from_secs(150)).build().map_err(|e| e.to_string())?;
-    let created = create_artifact_job(&client, &root, "/v1/rig-existing", source_job, model, serde_json::json!({
+    let created = create_artifact_job(&client, &root, "/v1/rig-existing", source_job, r2_artifact, model, serde_json::json!({
         "dataUrls": data_urls,
         "anatomyProfile": anatomy,
     })).await?;
@@ -385,6 +411,7 @@ pub async fn start_existing_rig(app: &AppHandle, data_urls: &[String], anatomy: 
             value.generation.message = job.message.clone();
             value.generation.error = job.error.clone();
             if job.rig_analysis.is_some() { value.generation.rig_analysis = job.rig_analysis.clone(); }
+            if let Some(artifact) = job.artifact.as_ref() { value.generation.remote_artifact_id = Some(artifact.id.clone()); value.generation.remote_artifact_token = Some(artifact.token.clone()); }
         })?;
         publish(app);
         match current_stage {
@@ -410,20 +437,21 @@ pub async fn start_existing_rig(app: &AppHandle, data_urls: &[String], anatomy: 
 }
 
 pub async fn animate_existing(app: &AppHandle) -> Result<(), String> {
-    let (generation_id, model_path, source_job) = {
+    let (generation_id, model_path, source_job, r2_artifact) = {
         let state = app.state::<crate::app_state::RuntimeState>();
         let value = state.inner.lock().map_err(|_| "State unavailable")?;
         (
             value.generation.id.clone().ok_or("The local generation is missing")?,
             value.generation.candidate_model_path.clone().ok_or("The rigged model is missing")?,
             value.generation.task_id.clone().zip(value.generation.task_token.clone()),
+            value.generation.remote_artifact_id.clone().zip(value.generation.remote_artifact_token.clone()),
         )
     };
     let model = tokio::fs::read(&model_path).await.map_err(|e| format!("Could not read the rigged model: {e}"))?;
     if model.len() < 20 || model.len() > 60 * 1024 * 1024 || &model[..4] != b"glTF" { return Err("The rigged GLB is invalid or too large.".into()); }
     let root = server_root();
     let client = reqwest::Client::builder().timeout(Duration::from_secs(150)).build().map_err(|e| e.to_string())?;
-    let created = create_artifact_job(&client, &root, "/v1/animate-existing", source_job, model, serde_json::json!({})).await?;
+    let created = create_artifact_job(&client, &root, "/v1/animate-existing", source_job, r2_artifact, model, serde_json::json!({})).await?;
     mutate(app, |value| {
         value.generation.task_id = Some(created.id.clone());
         value.generation.task_token = Some(created.token.clone());
@@ -447,6 +475,7 @@ pub async fn animate_existing(app: &AppHandle) -> Result<(), String> {
             value.generation.progress = job.progress.clamp(0.0, 100.0);
             value.generation.message = job.message.clone();
             value.generation.error = job.error.clone();
+            if let Some(artifact) = job.artifact.as_ref() { value.generation.remote_artifact_id = Some(artifact.id.clone()); value.generation.remote_artifact_token = Some(artifact.token.clone()); }
         })?;
         publish(app);
         match current_stage {

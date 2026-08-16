@@ -117,6 +117,10 @@ pub struct PetAsset {
     pub character_profile: CharacterProfile,
     #[serde(default)]
     pub rig_analysis: Option<RigAnalysis>,
+    #[serde(default)]
+    pub remote_artifact_id: Option<String>,
+    #[serde(default)]
+    pub remote_artifact_token: Option<String>,
     pub created_at: String,
 }
 
@@ -144,6 +148,8 @@ pub struct GenerationState {
     pub error: Option<String>,
     pub task_id: Option<String>,
     pub task_token: Option<String>,
+    pub remote_artifact_id: Option<String>,
+    pub remote_artifact_token: Option<String>,
     pub candidate_model_path: Option<String>,
     pub candidate_source_path: Option<String>,
     pub body_type: Option<BodyType>,

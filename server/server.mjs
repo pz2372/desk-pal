@@ -1,11 +1,12 @@
 import { createServer } from "node:http";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { randomBytes, randomUUID } from "node:crypto";
 import { extname, join } from "node:path";
 import { spawn } from "node:child_process";
 import { createRigAnalysis, familyForBodyType, mergeSmartRigAnalysis, validateBlenderGuide, validateRigCorrections } from "./rigging.mjs";
 import { analyzeImagePreflight, validateInitialAnatomy } from "./preflight.mjs";
 import { analyzeModelAnatomy } from "./anatomy.mjs";
+import { getR2Model, putR2Model, r2Configured } from "./r2.mjs";
 
 const PORT = Number(process.env.PORT || 8787);
 const HOST = process.env.HOST || (process.env.RENDER ? "0.0.0.0" : "127.0.0.1");
@@ -24,9 +25,10 @@ const RENDER_SCRIPT = new URL("./blender/render_model_views.py", import.meta.url
 const PROJECT_SCRIPT = new URL("./blender/project_landmarks.py", import.meta.url).pathname;
 const ANIMATE_SCRIPT = new URL("./blender/animate_pet.py", import.meta.url).pathname;
 const MODEL_VIEWS = ["front", "front_left", "left", "back", "right", "front_right"];
-const DOWNLOADED_JOB_TTL_MS = 15 * 60 * 1000;
+const DOWNLOADED_JOB_TTL_MS = 60 * 60 * 1000;
 const TERMINAL_JOB_TTL_MS = 60 * 60 * 1000;
 const MAX_JOB_TTL_MS = 24 * 60 * 60 * 1000;
+const ARTIFACT_CHUNK_BYTES = 5 * 1024 * 1024;
 
 function send(response, status, payload, headers = {}) {
   const body = Buffer.from(JSON.stringify(payload));
@@ -35,7 +37,7 @@ function send(response, status, payload, headers = {}) {
 }
 
 function publicJob(job) {
-  return { id: job.id, stage: job.stage, progress: job.progress, message: job.message, error: job.error, analysisStep: job.analysisStep, bodyType: job.bodyType, rigAnalysis: job.rigAnalysis, baseModelUrl: job.baseModelPath ? `/v1/jobs/${job.id}/base-model?token=${job.token}` : undefined, modelUrl: ["rig_ready", "completed"].includes(job.stage) ? `/v1/jobs/${job.id}/model?token=${job.token}` : undefined };
+  return { id: job.id, stage: job.stage, progress: job.progress, message: job.message, error: job.error, analysisStep: job.analysisStep, bodyType: job.bodyType, rigAnalysis: job.rigAnalysis, artifact: job.r2Artifact, baseModelUrl: job.baseModelPath ? `/v1/jobs/${job.id}/base-model?token=${job.token}` : undefined, modelUrl: ["rig_ready", "completed"].includes(job.stage) ? `/v1/jobs/${job.id}/model?token=${job.token}` : undefined };
 }
 
 function scheduleJobCleanup(job, ttlMs = DOWNLOADED_JOB_TTL_MS) {
@@ -60,14 +62,18 @@ async function bodyJson(request) {
   return JSON.parse(Buffer.concat(chunks).toString("utf8"));
 }
 
-async function bodyModel(request) {
+async function bodyBytes(request, maximumSize) {
   const chunks = []; let size = 0;
   for await (const chunk of request) {
     size += chunk.length;
-    if (size > 60 * 1024 * 1024) throw new Error("The GLB model is larger than 60 MB.");
+    if (size > maximumSize) throw new Error("The binary upload is larger than allowed.");
     chunks.push(chunk);
   }
-  const data = Buffer.concat(chunks);
+  return Buffer.concat(chunks);
+}
+
+async function bodyModel(request) {
+  const data = await bodyBytes(request, 60 * 1024 * 1024);
   if (data.length < 20 || data.subarray(0, 4).toString() !== "glTF") throw new Error("The uploaded GLB model is invalid.");
   return data;
 }
@@ -89,23 +95,38 @@ function dataModel(dataUrl) {
   return data;
 }
 
-async function resolveModelArtifact(payload) {
+async function persistR2Artifact(job, kind, model) {
+  if (!r2Configured) return;
+  try {
+    job.r2Artifact = await putR2Model(model, kind, job.r2Artifact?.id);
+  } catch (error) {
+    console.error("R2 artifact persistence failed", { jobId: job.id, kind, error: error instanceof Error ? error.message : String(error) });
+  }
+}
+
+async function resolveModelArtifact(payload, r2Kind) {
   if (payload?.sourceJob?.id && payload?.sourceJob?.token) {
     const source = jobs.get(String(payload.sourceJob.id));
-    if (!source || source.token !== payload.sourceJob.token) {
+    if (source && source.token === payload.sourceJob.token) {
+      const sourcePath = source.modelPath || source.baseModelPath;
+      if (!sourcePath) throw new Error("The source job does not have a usable model yet.");
+      scheduleJobCleanup(source);
+      return { model: await readFile(sourcePath), r2Artifact: source.r2Artifact };
+    }
+    if (!payload?.r2Artifact) {
       const error = new Error("The temporary server model has expired.");
       error.status = 410;
       throw error;
     }
-    const sourcePath = source.modelPath || source.baseModelPath;
-    if (!sourcePath) throw new Error("The source job does not have a usable model yet.");
-    scheduleJobCleanup(source);
-    return readFile(sourcePath);
+  }
+  if (payload?.r2Artifact) {
+    const stored = await getR2Model(payload.r2Artifact, r2Kind);
+    return { model: stored.model, r2Artifact: stored.reference };
   }
   if (payload?.modelArtifact?.id && payload?.modelArtifact?.token) {
     const id = String(payload.modelArtifact.id);
     const artifact = artifacts.get(id);
-    if (!artifact || artifact.token !== payload.modelArtifact.token) {
+    if (!artifact || artifact.token !== payload.modelArtifact.token || !artifact.complete) {
       const error = new Error("The uploaded model artifact has expired.");
       error.status = 410;
       throw error;
@@ -113,9 +134,9 @@ async function resolveModelArtifact(payload) {
     artifacts.delete(id);
     const model = await readFile(artifact.path);
     await rm(artifact.path, { force: true });
-    return model;
+    return { model };
   }
-  return dataModel(payload?.modelDataUrl);
+  return { model: dataModel(payload?.modelDataUrl) };
 }
 
 async function tripo(path, options = {}) {
@@ -222,6 +243,7 @@ async function runBlenderRig(job, automatic = false) {
   if (model.length < 20 || model.subarray(0, 4).toString() !== "glTF") throw new Error("Blender returned an invalid GLB model.");
   job.modelPath = outputPath;
   job.rigAnalysis = { ...job.rigAnalysis, status: "corrected", confidence: 1 };
+  await persistR2Artifact(job, "rigged", model);
   update(job, "rig_ready", 84, automatic ? "Your GPT-guided Blender rig is ready." : "Your corrected Blender rig is ready.");
 }
 
@@ -236,6 +258,7 @@ async function runBlenderAnimation(job) {
   });
   if (model.length < 20 || model.subarray(0, 4).toString() !== "glTF") throw new Error("Blender returned an invalid animated GLB model.");
   job.modelPath = outputPath;
+  await persistR2Artifact(job, "animated", model);
   update(job, "completed", 100, "Your animated Desk Pal is ready.");
 }
 
@@ -336,6 +359,7 @@ async function generate(job, images, filenames, classifiedViews) {
     const baseModelPath = join(job.directory, "base.glb");
     await downloadGlb(baseModelUrl, baseModelPath);
     job.baseModelPath = baseModelPath;
+    await persistR2Artifact(job, "base", await readFile(baseModelPath));
 
     // Model creation is intentionally its own durable stage. The desktop saves
     // this GLB before starting a separate rig job, so Blender or animation can
@@ -365,7 +389,7 @@ async function handler(request, response) {
   response.setHeader("access-control-allow-headers", "content-type");
   if (request.method === "OPTIONS") { response.writeHead(204); return response.end(); }
   const url = new URL(request.url, `http://${request.headers.host || "localhost"}`);
-  if (request.method === "GET" && url.pathname === "/health") return send(response, 200, { ok: true, release: process.env.RENDER_GIT_COMMIT?.slice(0, 7) || "local", generationConfigured: Boolean(TRIPO_API_KEY), preflightConfigured: Boolean(process.env.OPENAI_API_KEY), smartRigConfigured: Boolean(process.env.OPENAI_API_KEY && BLENDER_BIN) });
+  if (request.method === "GET" && url.pathname === "/health") return send(response, 200, { ok: true, release: process.env.RENDER_GIT_COMMIT?.slice(0, 7) || "local", generationConfigured: Boolean(TRIPO_API_KEY), preflightConfigured: Boolean(process.env.OPENAI_API_KEY), smartRigConfigured: Boolean(process.env.OPENAI_API_KEY && BLENDER_BIN), r2Configured });
   if (request.method === "POST" && url.pathname === "/v1/preflight") {
     if (!process.env.OPENAI_API_KEY) return send(response, 503, { error: "The GPT image-quality check is not configured." });
     if (!allowRequest(request.socket.remoteAddress || "unknown", preflightBuckets, 15)) return send(response, 429, { error: "Image check limit reached. Try again later." });
@@ -404,9 +428,41 @@ async function handler(request, response) {
       const id = randomUUID(); const token = randomBytes(24).toString("hex");
       const directory = join(DATA_ROOT, "artifacts"); const path = join(directory, `${id}.glb`);
       await mkdir(directory, { recursive: true }); await writeFile(path, model);
-      artifacts.set(id, { id, token, path, createdAt: Date.now() });
+      artifacts.set(id, { id, token, path, createdAt: Date.now(), size: model.length, nextChunk: 1, complete: true });
       return send(response, 201, { id, token });
     } catch (error) { return send(response, 400, { error: error instanceof Error ? error.message : String(error) }); }
+  }
+  if (request.method === "POST" && url.pathname === "/v1/artifacts/init") {
+    const id = randomUUID(); const token = randomBytes(24).toString("hex");
+    const directory = join(DATA_ROOT, "artifacts"); const path = join(directory, `${id}.glb`);
+    await mkdir(directory, { recursive: true }); await writeFile(path, Buffer.alloc(0));
+    artifacts.set(id, { id, token, path, createdAt: Date.now(), size: 0, nextChunk: 0, complete: false });
+    return send(response, 201, { id, token, chunkSize: ARTIFACT_CHUNK_BYTES });
+  }
+  const artifactMatch = /^\/v1\/artifacts\/([0-9a-f-]+)\/(chunks\/(\d+)|complete)$/.exec(url.pathname);
+  if (artifactMatch) {
+    const artifact = artifacts.get(artifactMatch[1]);
+    if (!artifact || url.searchParams.get("token") !== artifact.token) return send(response, 404, { error: "Artifact upload not found." });
+    if (request.method === "PUT" && artifactMatch[3] !== undefined) {
+      try {
+        const index = Number(artifactMatch[3]);
+        if (artifact.complete || index !== artifact.nextChunk) throw new Error(`Expected artifact chunk ${artifact.nextChunk}.`);
+        const chunk = await bodyBytes(request, ARTIFACT_CHUNK_BYTES);
+        if (!chunk.length) throw new Error("Artifact chunks cannot be empty.");
+        if (artifact.size + chunk.length > 60 * 1024 * 1024) throw new Error("The GLB model is larger than 60 MB.");
+        await appendFile(artifact.path, chunk);
+        artifact.size += chunk.length; artifact.nextChunk += 1; artifact.createdAt = Date.now();
+        return send(response, 200, { received: chunk.length, nextChunk: artifact.nextChunk });
+      } catch (error) { return send(response, 400, { error: error instanceof Error ? error.message : String(error) }); }
+    }
+    if (request.method === "POST" && artifactMatch[2] === "complete") {
+      try {
+        const model = await readFile(artifact.path);
+        if (model.length < 20 || model.subarray(0, 4).toString() !== "glTF") throw new Error("The assembled GLB artifact is invalid.");
+        artifact.complete = true; artifact.createdAt = Date.now();
+        return send(response, 200, { id: artifact.id, token: artifact.token });
+      } catch (error) { return send(response, 400, { error: error instanceof Error ? error.message : String(error) }); }
+    }
   }
   if (request.method === "POST" && url.pathname === "/v1/rig-existing") {
     if (!process.env.OPENAI_API_KEY) return send(response, 503, { error: "Smart rigging is not configured." });
@@ -416,13 +472,15 @@ async function handler(request, response) {
       const dataUrls = Array.isArray(payload.dataUrls) ? payload.dataUrls : [payload.dataUrl];
       if (dataUrls.length < 1 || dataUrls.length > 3) throw new Error("Choose between one and three reference images.");
       const images = dataUrls.map(dataImage);
-      const model = await resolveModelArtifact(payload);
+      const resolved = await resolveModelArtifact(payload, "base");
+      const model = resolved.model;
       const id = randomUUID(); const token = randomBytes(24).toString("hex");
       const directory = join(DATA_ROOT, id); const baseModelPath = join(directory, "base.glb");
       await mkdir(directory, { recursive: true }); await writeFile(baseModelPath, model);
       const initialAnatomy = payload.anatomyProfile ? validateInitialAnatomy(payload.anatomyProfile, images.length) : undefined;
-      const job = { id, token, stage: "analyzing", progress: 60, message: "Preparing the existing model for smart rigging…", createdAt: Date.now(), directory, baseModelPath, cancelled: false, initialAnatomy };
+      const job = { id, token, stage: "analyzing", progress: 60, message: "Preparing the existing model for smart rigging…", createdAt: Date.now(), directory, baseModelPath, cancelled: false, initialAnatomy, r2Artifact: resolved.r2Artifact };
       jobs.set(id, job);
+      if (!job.r2Artifact) await persistR2Artifact(job, "base", model);
       if (payload.rigGuide) {
         const corrected = validateRigCorrections(payload.rigGuide);
         job.rigAnalysis = corrected;
@@ -443,12 +501,14 @@ async function handler(request, response) {
     if (!allowRequest(request.socket.remoteAddress || "unknown")) return send(response, 429, { error: "Animation limit reached. Try again later." });
     try {
       const payload = await bodyJson(request);
-      const model = await resolveModelArtifact(payload);
+      const resolved = await resolveModelArtifact(payload, "rigged");
+      const model = resolved.model;
       const id = randomUUID(); const token = randomBytes(24).toString("hex");
       const directory = join(DATA_ROOT, id); const baseModelPath = join(directory, "rigged.glb");
       await mkdir(directory, { recursive: true }); await writeFile(baseModelPath, model);
-      const job = { id, token, stage: "animating", progress: 88, message: "Preparing the reusable animation library…", createdAt: Date.now(), directory, baseModelPath, cancelled: false };
+      const job = { id, token, stage: "animating", progress: 88, message: "Preparing the reusable animation library…", createdAt: Date.now(), directory, baseModelPath, cancelled: false, r2Artifact: resolved.r2Artifact };
       jobs.set(id, job);
+      if (!job.r2Artifact) await persistR2Artifact(job, "rigged", model);
       runBlenderAnimation(job).catch((error) => {
         job.stage = job.cancelled ? "cancelled" : "failed";
         job.message = job.cancelled ? "Animation cancelled" : "Blender could not apply the animation library";

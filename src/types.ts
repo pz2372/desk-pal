@@ -78,6 +78,8 @@ export interface PetAsset {
   bodyType: BodyType;
   characterProfile: CharacterProfile;
   rigAnalysis?: RigAnalysis;
+  remoteArtifactId?: string;
+  remoteArtifactToken?: string;
   createdAt: string;
 }
 
@@ -104,6 +106,8 @@ export interface GenerationState {
   message: string;
   error?: string;
   taskId?: string;
+  remoteArtifactId?: string;
+  remoteArtifactToken?: string;
   candidateModelPath?: string;
   candidateSourcePath?: string;
   bodyType?: BodyType;
