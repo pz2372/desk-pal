@@ -191,15 +191,41 @@ async fn submit_rig_corrections(app: AppHandle, analysis: RigAnalysis) -> Result
     let corrected = tripo::submit_corrections(&app, analysis).await?;
     let body_type = if corrected.family == RigFamily::Quadruped { models::BodyType::Quadruped } else { models::BodyType::Biped };
     mutate(&app, |state| {
-        state.generation.rig_analysis = Some(corrected.clone());
-        state.generation.body_type = Some(body_type.clone());
-        state.generation.stage = GenerationStage::Completed;
-        state.generation.progress = 100.0;
-        state.generation.message = "Your Blender-rigged 3D pet is ready to preview.".into();
+        state.generation.rig_analysis = Some(corrected);
+        state.generation.body_type = Some(body_type);
+        state.generation.stage = GenerationStage::RigReady;
+        state.generation.progress = 84.0;
+        state.generation.message = "Your rigged model is saved. Starting animation separately…".into();
         state.generation.error = None;
     })?;
     let _ = app.emit("generation-progress", ());
-    Ok(())
+    tripo::animate_existing(&app).await
+}
+
+#[tauri::command]
+async fn retry_rigging(app: AppHandle) -> Result<(), String> {
+    let analysis = {
+        let state = app.state::<RuntimeState>();
+        let value = state.inner.lock().map_err(|_| "State unavailable")?;
+        value.generation.rig_analysis.clone()
+    }.ok_or("The corrected rig guide is unavailable.")?;
+    let corrected = tripo::retry_existing_rig(&app, analysis).await?;
+    let body_type = if corrected.family == RigFamily::Quadruped { models::BodyType::Quadruped } else { models::BodyType::Biped };
+    mutate(&app, |state| {
+        state.generation.rig_analysis = Some(corrected);
+        state.generation.body_type = Some(body_type);
+        state.generation.stage = GenerationStage::RigReady;
+        state.generation.progress = 84.0;
+        state.generation.message = "Your optimized rig is saved. Starting animation separately…".into();
+        state.generation.error = None;
+    })?;
+    let _ = app.emit("generation-progress", ());
+    tripo::animate_existing(&app).await
+}
+
+#[tauri::command]
+async fn retry_animation(app: AppHandle) -> Result<(), String> {
+    tripo::animate_existing(&app).await
 }
 
 #[tauri::command]
@@ -482,7 +508,7 @@ pub fn run() {
         .on_window_event(|window, event| {
             if window.label() == "setup" { if let WindowEvent::CloseRequested { api, .. } = event { api.prevent_close(); let _ = window.hide(); } }
         })
-        .invoke_handler(tauri::generate_handler![get_app_snapshot, get_pet_snapshot, select_pet, save_widget_position, preflight_images, start_generation, cancel_generation, use_image_candidate, use_model_candidate, submit_rig_corrections, activate_pet, delete_pet, discard_pet_candidate, set_paused, set_overlay_mode, set_cursor_passthrough, set_launch_on_startup, ensure_local_model, send_chat, clear_conversation])
+        .invoke_handler(tauri::generate_handler![get_app_snapshot, get_pet_snapshot, select_pet, save_widget_position, preflight_images, start_generation, cancel_generation, use_image_candidate, use_model_candidate, submit_rig_corrections, retry_rigging, retry_animation, activate_pet, delete_pet, discard_pet_candidate, set_paused, set_overlay_mode, set_cursor_passthrough, set_launch_on_startup, ensure_local_model, send_chat, clear_conversation])
         .run(tauri::generate_context!())
         .expect("error while running Desk Pal");
 }

@@ -5,7 +5,7 @@ import { isTauri } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { AppSnapshot, Personality, PetConfig, PreflightIssue, RigAnalysis, RigFamily } from "../types";
 import { EMPTY_SNAPSHOT } from "../types";
-import { activatePet, assetUrl, cancelGeneration, deletePet, discardPetCandidate, getSnapshot, preflightImages, selectPet, startGeneration, submitRigCorrections, useImageCandidate, useModelCandidate } from "../lib/native";
+import { activatePet, assetUrl, cancelGeneration, deletePet, discardPetCandidate, getSnapshot, preflightImages, retryAnimation, retryRigging, selectPet, startGeneration, submitRigCorrections, useImageCandidate, useModelCandidate } from "../lib/native";
 import { fileAsDataUrl, validateImage } from "../lib/validation";
 import { createCorrectionGuide, firstMissingLandmark } from "../lib/rigging";
 import { ModelStage } from "./ModelStage";
@@ -162,8 +162,24 @@ export function SetupFlow() {
   async function saveRigGuide() {
     if (!rigGuide || firstMissingLandmark(rigGuide)) return setError("Choose every requested body point before continuing.");
     setBusy(true); setError(undefined);
+    // Move to the normal progress screen immediately. The Rust command keeps
+    // polling Blender, so leaving the user on a spinning submit button makes a
+    // healthy long-running rig look frozen.
+    setStep(2);
     try { await submitRigCorrections(rigGuide); setSnapshot(await getSnapshot()); }
-    catch (e) { setError(String(e)); } finally { setBusy(false); }
+    catch (e) { setError(String(e)); setSnapshot(await getSnapshot()); } finally { setBusy(false); }
+  }
+
+  async function retryBlenderRig() {
+    setBusy(true); setError(undefined); setStep(2);
+    try { await retryRigging(); setSnapshot(await getSnapshot()); }
+    catch (e) { setError(String(e)); setSnapshot(await getSnapshot()); } finally { setBusy(false); }
+  }
+
+  async function retryAnimationFlow() {
+    setBusy(true); setError(undefined); setStep(2);
+    try { await retryAnimation(); setSnapshot(await getSnapshot()); }
+    catch (e) { setError(String(e)); setSnapshot(await getSnapshot()); } finally { setBusy(false); }
   }
 
   async function activate() {
@@ -229,6 +245,7 @@ export function SetupFlow() {
         {step === 3 && snapshot.generation.stage !== "needs_correction" && <div className="preview-layout"><div className="preview-stage"><ModelStage url={assetUrl(snapshot.generation.candidateModelPath)} imageUrl={assetUrl(snapshot.generation.candidateSourcePath) ?? imageUrls[0]} interactive /><span>Drag to rotate · scroll to zoom</span></div><div className="preview-copy"><p className="eyebrow">STEP 4 OF 5</p><h2>Meet your new companion</h2><p>{snapshot.generation.candidateModelPath ? snapshot.generation.bodyType === "unknown" ? "Your generated 3D pet is ready. It will stay static because this model could not be rigged." : `Your ${snapshot.generation.bodyType?.replaceAll("_", " ") ?? "animated"} pet is rigged and ready to roam.` : "You’re using the uploaded image as your pet for now."}</p><button className="primary-button" onClick={() => setStep(4)}>Looks good <ChevronRight /></button><button className="ghost-button center" onClick={() => setStep(1)}>Try other images</button></div></div>}
         {step === 4 && <div className="panel-body personality-panel"><div className="panel-icon"><Sparkles /></div><p className="eyebrow">FINAL STEP</p><h2>Give them a personality</h2><label className="field-label">Pet name</label><input className="text-input" value={config.name} maxLength={28} onChange={(e) => setConfig({ ...config, name: e.target.value })} /><div className="personality-grid">{personalities.map((item) => <button key={item.id} onClick={() => setConfig({ ...config, personality: item.id })} className={config.personality === item.id ? "selected" : ""}><strong>{item.label}</strong><span>{item.copy}</span></button>)}</div><label className="field-label">A little extra personality <span>optional</span></label><textarea value={config.personalityNote} maxLength={240} onChange={(e) => setConfig({ ...config, personalityNote: e.target.value })} placeholder="Loves rainy days and terrible jokes…" /><label className="field-label">Chat style</label><div className="chat-mode-grid"><button onClick={() => setConfig({ ...config, chatMode: "on_click" })} className={config.chatMode === "on_click" ? "selected" : ""}><strong>Click pet to chat</strong><span>The glass chat opens only when you click your pet.</span></button><button onClick={() => setConfig({ ...config, chatMode: "glass_widget" })} className={config.chatMode === "glass_widget" ? "selected" : ""}><strong>Glass widget</strong><span>Keep the clear chat panel visible in the background.</span></button></div><div className="preference-group"><label className="switch-row"><span><strong>Show pet when my computer starts</strong><small>You can change this anytime from the tray.</small></span><input type="checkbox" checked={config.launchOnStartup} onChange={(e) => setConfig({ ...config, launchOnStartup: e.target.checked })} /><i /></label><label className="switch-row"><span><strong>Stay above other apps</strong><small>Turn this off for a desktop-only companion.</small></span><input type="checkbox" checked={config.overlayMode === "always_on_top"} onChange={(e) => setConfig({ ...config, overlayMode: e.target.checked ? "always_on_top" : "normal" })} /><i /></label></div><button className="primary-button" disabled={busy} onClick={activate}>{busy ? <LoaderCircle className="spin" /> : <><PawPrint /> Activate {config.name || "pet"}</>}</button></div>}
         </>}
+        {screen === "onboarding" && step === 2 && snapshot.generation.stage === "failed" && snapshot.generation.rigAnalysis?.status === "corrected" && <button className="primary-button progress-action" disabled={busy} onClick={(snapshot.generation.error ?? "").toLowerCase().includes("animation") ? retryAnimationFlow : retryBlenderRig}>{busy ? <LoaderCircle className="spin" /> : <><RefreshCcw /> {(snapshot.generation.error ?? "").toLowerCase().includes("animation") ? "Retry animation only" : "Retry Blender rig"}</>}</button>}
         {activeError && showError && <div className="error-banner" role="alert">{activeError}</div>}
       </div>
     </section>

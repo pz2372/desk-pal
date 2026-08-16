@@ -9,7 +9,7 @@ export type OverlayMode = "normal" | "always_on_top";
 export type ChatMode = "on_click" | "glass_widget";
 export type Emotion = "happy" | "curious" | "calm" | "sleepy" | "surprised" | "annoyed";
 export type PetAction = "idle" | "walk" | "turn" | "jump" | "react";
-export type GenerationStage = "idle" | "uploading" | "generating" | "rig_check" | "analyzing" | "needs_correction" | "rigging" | "animating" | "downloading" | "completed" | "failed" | "cancelled";
+export type GenerationStage = "idle" | "uploading" | "generating" | "model_ready" | "rig_check" | "analyzing" | "needs_correction" | "rigging" | "rig_ready" | "animating" | "downloading" | "completed" | "failed" | "cancelled";
 export type PreflightIssueType = "different_character" | "inconsistent_appearance" | "missing_anatomy" | "conflicting_proportions" | "duplicate_angle" | "background_confusion" | "hidden_limbs";
 export type ImageViewAngle = "front" | "front_three_quarter" | "left" | "right" | "back" | "left_three_quarter" | "right_three_quarter" | "unknown";
 

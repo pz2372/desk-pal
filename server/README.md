@@ -26,16 +26,22 @@ Then start the service:
 npm run server
 ```
 
-The smart rigging path requires Blender 3.4 or newer to be installed. Verify it with
-`blender --version`. After Tripo creates the unrigged model, Blender renders six
-neutral views of the completed GLB. GPT compares those renders with
-the original upload, classifies the body, and returns strict normalized landmark
-coordinates. Blender ray-projects confident points onto the actual mesh, creates
-the armature, applies automatic skin weights, validates it, and exports starter
-`idle`, `walk`, `turn`, `jump`, and `react` actions. Only low-confidence or
-unprojectable points are sent to the existing guided correction screen. When
-`OPENAI_API_KEY` is configured this replaces paid Tripo rigging/retargeting; the
-older Tripo animation path is retained only as a no-GPT fallback.
+The pipeline uses three independent, retryable artifacts. Tripo first creates and
+the desktop saves `base.glb` in the user's Tauri application-data directory. A separate Blender rig job renders six neutral model
+views, lets GPT refine the image-first anatomy profile, projects landmarks onto
+the mesh, optimizes overly dense geometry, and saves `rigged.glb`. Only uncertain
+landmarks enter the guided correction screen. A final independent Blender job
+applies the reusable `idle`, `walk`, `turn`, `jump`, and `react` library and saves
+`pet.glb`. A rig or animation retry therefore reuses the last successful local
+artifact and never repeats paid Tripo model generation.
+
+Render is temporary compute, not the pet database. It keeps a processing copy only
+while a job is running and long enough for the desktop to download the result.
+Downloaded artifacts are queued for deletion after 15 minutes; other terminal jobs
+expire after one hour, with a 24-hour maximum for abandoned work. Reference images,
+pet models, rigged models, and final animated pets are not copied into company object
+storage. A private company bucket may later hold only Desk Pal-owned rig templates,
+animation clips, and version manifests shared by all users.
 
 For Render, deploy the repository root as a **Docker Web Service**. The included
 [`Dockerfile`](../Dockerfile) installs Node and Blender. Configure:
@@ -70,4 +76,8 @@ DESK_PAL_SERVER_URL=https://your-generation-service.example npm run tauri build
 `DESK_PAL_SERVER_URL` remains available as an override for staging or a future
 custom domain.
 
-The prototype server limits each IP to five creation jobs per hour and removes completed job data after 24 hours. Production deployment should replace its in-memory job registry with durable storage, a background job queue, object storage, authenticated user quotas, and stricter Blender process isolation.
+The prototype server limits each IP to five creation jobs per hour. Production
+deployment should replace its in-memory job registry with a background queue and
+authenticated user quotas. Object storage is needed only for company-owned reusable
+rig/animation library assets, not for user pets. Blender process isolation should
+also be tightened before public use.

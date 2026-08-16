@@ -13,6 +13,8 @@ from mathutils import Vector
 if "bool" not in np.__dict__:
     np.bool = np.bool_
 
+MAX_RIG_TRIANGLES = 180000
+
 
 def arguments():
     values = sys.argv[sys.argv.index("--") + 1:]
@@ -118,6 +120,29 @@ def add_extras(edit_bones, points, chest_parent, root_parent):
             add_bone(edit_bones, f"wing_{side[0]}_02", middle, points[name], first)
 
 
+def optimize_dense_meshes(meshes):
+    """Reduce oversized generation meshes before desktop skinning/export."""
+    triangle_count = sum(len(mesh.data.polygons) for mesh in meshes)
+    if triangle_count <= MAX_RIG_TRIANGLES:
+        return triangle_count
+    ratio = max(0.02, min(1.0, MAX_RIG_TRIANGLES / float(triangle_count)))
+    print(f"Optimizing dense pet mesh: {triangle_count} -> about {MAX_RIG_TRIANGLES} triangles", flush=True)
+    for mesh in meshes:
+        if not mesh.data.polygons:
+            continue
+        bpy.ops.object.select_all(action="DESELECT")
+        mesh.select_set(True)
+        bpy.context.view_layer.objects.active = mesh
+        modifier = mesh.modifiers.new(name="DeskPalDesktopOptimize", type="DECIMATE")
+        modifier.decimate_type = "COLLAPSE"
+        modifier.ratio = ratio
+        modifier.use_collapse_triangulate = True
+        bpy.ops.object.modifier_apply(modifier=modifier.name)
+    optimized_count = sum(len(mesh.data.polygons) for mesh in meshes)
+    print(f"Dense pet optimization complete: {optimized_count} triangles", flush=True)
+    return optimized_count
+
+
 def has_usable_weights(meshes, armature, sample_limit=4096):
     deform_names = {bone.name for bone in armature.data.bones if bone.use_deform}
     for mesh in meshes:
@@ -202,76 +227,6 @@ def apply_nearest_bone_weights(meshes, armature):
                         group.add(indices, float(weight), "REPLACE")
 
 
-def reset_pose(armature):
-    for bone in armature.pose.bones:
-        bone.rotation_mode = "XYZ"
-        bone.rotation_euler = (0, 0, 0)
-        bone.location = (0, 0, 0)
-        bone.scale = (1, 1, 1)
-
-
-def key_rotation(bone, frame, x=0.0, y=0.0, z=0.0):
-    if not bone:
-        return
-    bone.rotation_euler = (x, y, z)
-    bone.keyframe_insert("rotation_euler", frame=frame)
-
-
-def create_action(armature, name):
-    reset_pose(armature)
-    action = bpy.data.actions.new(name=name)
-    armature.animation_data.action = action
-    return action
-
-
-def build_starter_animations(armature, family):
-    armature.animation_data_create()
-    actions = []
-
-    action = create_action(armature, "idle")
-    spine = armature.pose.bones.get("spine") or armature.pose.bones.get("neck")
-    for frame, angle in ((1, -0.025), (20, 0.035), (40, -0.025)):
-        key_rotation(spine, frame, z=angle)
-    actions.append(action)
-
-    action = create_action(armature, "walk")
-    if family == "humanoid":
-        pairs = [("thigh_l", "thigh_r"), ("upper_arm_l", "upper_arm_r")]
-    else:
-        pairs = [("front_upper_l", "front_upper_r"), ("back_upper_r", "back_upper_l")]
-    for frame, angle in ((1, 0.38), (11, -0.38), (21, 0.38), (31, -0.38), (41, 0.38)):
-        for left, right in pairs:
-            key_rotation(armature.pose.bones.get(left), frame, x=angle)
-            key_rotation(armature.pose.bones.get(right), frame, x=-angle)
-    actions.append(action)
-
-    action = create_action(armature, "turn")
-    root = armature.pose.bones.get("root")
-    for frame, angle in ((1, 0.0), (16, math.radians(24)), (32, 0.0)):
-        key_rotation(root, frame, z=angle)
-    actions.append(action)
-
-    action = create_action(armature, "jump")
-    reset_pose(armature)
-    for frame, height in ((1, 0.0), (8, -0.06), (17, 0.32), (26, 0.0), (34, 0.0)):
-        root.location.z = height
-        root.keyframe_insert("location", frame=frame)
-    actions.append(action)
-
-    action = create_action(armature, "react")
-    head = armature.pose.bones.get("head")
-    for frame, angle in ((1, 0.0), (8, -0.16), (16, 0.18), (25, 0.0)):
-        key_rotation(head, frame, y=angle)
-    actions.append(action)
-
-    armature.animation_data.action = None
-    for action in actions:
-        track = armature.animation_data.nla_tracks.new()
-        track.name = action.name
-        track.strips.new(action.name, int(action.frame_range[0]), action)
-    return actions
-
-
 def main():
     input_path, guide_path, output_path = arguments()
     with open(guide_path, "r", encoding="utf-8") as handle:
@@ -285,6 +240,7 @@ def main():
     meshes = [obj for obj in bpy.context.scene.objects if obj.type == "MESH"]
     if not meshes:
         raise RuntimeError("The generated GLB contains no mesh")
+    optimize_dense_meshes(meshes)
 
     armature_data = bpy.data.armatures.new("DeskPalRig")
     armature = bpy.data.objects.new("DeskPalRig", armature_data)
@@ -322,9 +278,8 @@ def main():
         raise RuntimeError("Rig validation failed because vertices remain unweighted")
     armature["desk_pal_template"] = guide["templateId"]
     armature["desk_pal_rig_confidence"] = float(guide["confidence"])
-    build_starter_animations(armature, guide["family"])
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    bpy.ops.export_scene.gltf(filepath=output_path, export_format="GLB", export_skins=True, export_animations=True, export_nla_strips=True, export_force_sampling=True)
+    bpy.ops.export_scene.gltf(filepath=output_path, export_format="GLB", export_skins=True, export_animations=False)
     if not os.path.isfile(output_path) or os.path.getsize(output_path) < 20:
         raise RuntimeError("Blender did not produce a valid output model")
 

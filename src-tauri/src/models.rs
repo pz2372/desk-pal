@@ -6,7 +6,7 @@ pub enum AppLifecycle { #[default] NeedsSetup, Generating, Ready }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
-pub enum GenerationStage { #[default] Idle, Uploading, Generating, RigCheck, Analyzing, NeedsCorrection, Rigging, Animating, Downloading, Completed, Failed, Cancelled }
+pub enum GenerationStage { #[default] Idle, Uploading, Generating, ModelReady, RigCheck, Analyzing, NeedsCorrection, Rigging, RigReady, Animating, Downloading, Completed, Failed, Cancelled }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]

@@ -21,7 +21,11 @@ const BLENDER_BIN = process.env.BLENDER_BIN || "blender";
 const RIG_SCRIPT = new URL("./blender/rig_pet.py", import.meta.url).pathname;
 const RENDER_SCRIPT = new URL("./blender/render_model_views.py", import.meta.url).pathname;
 const PROJECT_SCRIPT = new URL("./blender/project_landmarks.py", import.meta.url).pathname;
+const ANIMATE_SCRIPT = new URL("./blender/animate_pet.py", import.meta.url).pathname;
 const MODEL_VIEWS = ["front", "front_left", "left", "back", "right", "front_right"];
+const DOWNLOADED_JOB_TTL_MS = 15 * 60 * 1000;
+const TERMINAL_JOB_TTL_MS = 60 * 60 * 1000;
+const MAX_JOB_TTL_MS = 24 * 60 * 60 * 1000;
 
 function send(response, status, payload, headers = {}) {
   const body = Buffer.from(JSON.stringify(payload));
@@ -30,7 +34,12 @@ function send(response, status, payload, headers = {}) {
 }
 
 function publicJob(job) {
-  return { id: job.id, stage: job.stage, progress: job.progress, message: job.message, error: job.error, analysisStep: job.analysisStep, bodyType: job.bodyType, rigAnalysis: job.rigAnalysis, baseModelUrl: job.baseModelPath ? `/v1/jobs/${job.id}/base-model?token=${job.token}` : undefined, modelUrl: job.stage === "completed" ? `/v1/jobs/${job.id}/model?token=${job.token}` : undefined };
+  return { id: job.id, stage: job.stage, progress: job.progress, message: job.message, error: job.error, analysisStep: job.analysisStep, bodyType: job.bodyType, rigAnalysis: job.rigAnalysis, baseModelUrl: job.baseModelPath ? `/v1/jobs/${job.id}/base-model?token=${job.token}` : undefined, modelUrl: ["rig_ready", "completed"].includes(job.stage) ? `/v1/jobs/${job.id}/model?token=${job.token}` : undefined };
+}
+
+function scheduleJobCleanup(job, ttlMs = DOWNLOADED_JOB_TTL_MS) {
+  const deleteAfter = Date.now() + ttlMs;
+  job.deleteAfter = job.deleteAfter ? Math.min(job.deleteAfter, deleteAfter) : deleteAfter;
 }
 
 function allowRequest(ip, bucket = rateBuckets, limit = 5) {
@@ -119,11 +128,6 @@ async function waitTask(job, id, floor, ceiling) {
 
 function update(job, stage, progress, message) { Object.assign(job, { stage, progress, message, error: undefined }); }
 
-function animations(bodyType) {
-  const walks = { quadruped: "preset:quadruped:walk", hexapod: "preset:hexapod:walk", octopod: "preset:octopod:walk", serpentine: "preset:serpentine:march", aquatic: "preset:aquatic:march" };
-  return ["preset:idle", walks[bodyType] || "preset:walk", "preset:turn", "preset:jump", "preset:hurt"];
-}
-
 function outputModelUrl(task) {
   const output = task.output || {};
   return [output.pbr_model, output.model, output.model_url, output.model_urls?.[0], output.base_model, task.model_url, task.model].find((value) => typeof value === "string" && value.startsWith("http"));
@@ -176,7 +180,21 @@ async function runBlenderRig(job, automatic = false) {
   if (model.length < 20 || model.subarray(0, 4).toString() !== "glTF") throw new Error("Blender returned an invalid GLB model.");
   job.modelPath = outputPath;
   job.rigAnalysis = { ...job.rigAnalysis, status: "corrected", confidence: 1 };
-  update(job, "completed", 100, automatic ? "Your GPT-guided Blender rig is ready." : "Your corrected Blender rig is ready.");
+  update(job, "rig_ready", 84, automatic ? "Your GPT-guided Blender rig is ready." : "Your corrected Blender rig is ready.");
+}
+
+async function runBlenderAnimation(job) {
+  if (!job.baseModelPath) throw new Error("The rigged model is unavailable for animation.");
+  const outputPath = join(job.directory, "pet-animated.glb");
+  update(job, "animating", 88, "Applying the reusable Desk Pal animation library…");
+  await runBlender(job, ANIMATE_SCRIPT, [job.baseModelPath, outputPath], "Blender animation", 8 * 60 * 1000);
+  const model = await readFile(outputPath).catch((error) => {
+    if (error?.code === "ENOENT") throw new Error("Blender finished without exporting the animated GLB.");
+    throw error;
+  });
+  if (model.length < 20 || model.subarray(0, 4).toString() !== "glTF") throw new Error("Blender returned an invalid animated GLB model.");
+  job.modelPath = outputPath;
+  update(job, "completed", 100, "Your animated Desk Pal is ready.");
 }
 
 async function smartRigFallback(job, images, suggestedBodyType, fallbackMessage, initialProfile = job.initialAnatomy) {
@@ -215,6 +233,13 @@ async function smartRigFallback(job, images, suggestedBodyType, fallbackMessage,
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
     console.error("Smart rig analysis failed", { jobId: job.id, step: job.analysisStep, error: detail });
+    if (job.analysisStep === "building_blender_rig" && job.rigAnalysis?.status === "corrected") {
+      job.stage = job.cancelled ? "cancelled" : "failed";
+      job.progress = 70;
+      job.message = job.cancelled ? "Rigging cancelled" : "The saved model is ready, but Blender could not finish this rig";
+      job.error = detail;
+      return;
+    }
     if (job.rigAnalysis?.status === "corrected") {
       const uncertain = [...job.rigAnalysis.landmarks].sort((left, right) => left.confidence - right.confidence)[0];
       if (uncertain) uncertain.position = undefined;
@@ -239,7 +264,7 @@ function multiviewFiles(uploadedViews) {
   return files;
 }
 
-async function generate(job, images, filenames, classifiedViews, initialProfile) {
+async function generate(job, images, filenames, classifiedViews) {
   try {
     update(job, "uploading", 3, "Checking generation capacity…");
     await requireGenerationCapacity(job);
@@ -270,56 +295,11 @@ async function generate(job, images, filenames, classifiedViews, initialProfile)
     await downloadGlb(baseModelUrl, baseModelPath);
     job.baseModelPath = baseModelPath;
 
-    // With GPT configured, the completed GLB is always analyzed and rigged in
-    // Blender. The provider rigging path below is retained as a no-GPT fallback.
-    if (process.env.OPENAI_API_KEY) {
-      await smartRigFallback(job, images, "biped", "Please help locate this character’s body parts.", initialProfile);
-      return;
-    }
-
-    update(job, "rig_check", 54, "Checking the creature’s body and limbs…");
-    let checked;
-    try {
-      const checkId = await createTask({ type: "animate_prerigcheck", original_model_task_id: generationId });
-      checked = await waitTask(job, checkId, 54, 62);
-    } catch (error) {
-      job.bodyType = "biped";
-      await smartRigFallback(job, images, job.bodyType, "The automatic body check needs a few corrected points.", initialProfile);
-      return;
-    }
-    job.bodyType = checked.output?.rig_type || checked.rig_type || "biped";
-    const riggable = Boolean(checked.output?.riggable ?? checked.riggable);
-    const guidedFamily = ["biped", "humanoid"].includes(job.bodyType) ? "humanoid" : job.bodyType === "quadruped" ? "quadruped" : undefined;
-    if (guidedFamily) job.rigAnalysis = createRigAnalysis(job.bodyType, riggable);
-    if (!riggable) {
-      if (!guidedFamily) throw new Error("Guided fallback rigging currently supports humanoids and quadrupeds. You can still use the generated static 3D model.");
-      await smartRigFallback(job, images, job.bodyType, "We need a little help locating this character’s body parts.", initialProfile);
-      return;
-    }
-
-    update(job, "rigging", 64, "Building a skeleton for movement…");
-    const rigId = await createTask({ type: "animate_rig", original_model_task_id: generationId, out_format: "glb", model_version: "v2.5-20260210", rig_type: job.bodyType, spec: "tripo" });
-    try {
-      await waitTask(job, rigId, 64, 77);
-    } catch (error) {
-      if (!guidedFamily) throw error;
-      job.error = error instanceof Error ? error.message : String(error);
-      await smartRigFallback(job, images, job.bodyType, "The automatic rig needs a few corrected body points.", initialProfile);
-      return;
-    }
-
-    update(job, "animating", 78, "Teaching your pet to walk and react…");
-    const animationId = await createTask({ type: "animate_retarget", original_model_task_id: rigId, out_format: "glb", animations: animations(job.bodyType), bake_animation: true, export_with_geometry: true, animate_in_place: true });
-    const animated = await waitTask(job, animationId, 78, 92);
-    const modelUrl = outputModelUrl(animated);
-    if (!modelUrl) throw new Error("Generation completed without a downloadable model.");
-
-    update(job, "downloading", 94, "Bringing your pet home…");
-    await mkdir(job.directory, { recursive: true });
-    const modelPath = join(job.directory, "pet.glb");
-    await downloadGlb(modelUrl, modelPath);
-    job.modelPath = modelPath;
-    update(job, "completed", 100, "Your pet is ready to meet you.");
+    // Model creation is intentionally its own durable stage. The desktop saves
+    // this GLB before starting a separate rig job, so Blender or animation can
+    // be retried without another paid Tripo generation.
+    update(job, "model_ready", 55, "Your 3D model is saved and ready for rigging.");
+    return;
   } catch (error) {
     const failedAt = job.stage;
     const detail = error instanceof Error ? error.message : String(error);
@@ -371,7 +351,7 @@ async function handler(request, response) {
       const initialAnatomy = payload.anatomyProfile ? validateInitialAnatomy(payload.anatomyProfile, images.length) : { family: "unsupported", species: "unknown creature", hasTail: false, hasWings: false, confidence: 0, explanation: "No image-only anatomy profile was supplied by this client.", landmarks: [] };
       const id = randomUUID(); const token = randomBytes(24).toString("hex");
       const job = { id, token, stage: "uploading", progress: 2, message: "Preparing your images…", createdAt: Date.now(), directory: join(DATA_ROOT, id), cancelled: false, initialAnatomy };
-      jobs.set(id, job); generate(job, images, filenames, classifiedViews, initialAnatomy);
+      jobs.set(id, job); generate(job, images, filenames, classifiedViews);
       return send(response, 202, { id, token });
     } catch (error) { return send(response, 400, { error: error instanceof Error ? error.message : String(error) }); }
   }
@@ -389,7 +369,39 @@ async function handler(request, response) {
       await mkdir(directory, { recursive: true }); await writeFile(baseModelPath, model);
       const initialAnatomy = payload.anatomyProfile ? validateInitialAnatomy(payload.anatomyProfile, images.length) : undefined;
       const job = { id, token, stage: "analyzing", progress: 60, message: "Preparing the existing model for smart rigging…", createdAt: Date.now(), directory, baseModelPath, cancelled: false, initialAnatomy };
-      jobs.set(id, job); smartRigFallback(job, images, "biped", "Please help locate this character’s body parts.", initialAnatomy);
+      jobs.set(id, job);
+      if (payload.rigGuide) {
+        const corrected = validateRigCorrections(payload.rigGuide);
+        job.rigAnalysis = corrected;
+        job.bodyType = corrected.family === "quadruped" ? "quadruped" : "biped";
+        runBlenderRig(job).catch((error) => {
+          job.stage = job.cancelled ? "cancelled" : "failed";
+          job.message = job.cancelled ? "Rigging cancelled" : "Blender could not finish this rig";
+          job.error = error instanceof Error ? error.message : String(error);
+          console.error("Existing-model rig retry failed", { jobId: job.id, error: job.error });
+        });
+      } else {
+        smartRigFallback(job, images, "biped", "Please help locate this character’s body parts.", initialAnatomy);
+      }
+      return send(response, 202, { id, token });
+    } catch (error) { return send(response, 400, { error: error instanceof Error ? error.message : String(error) }); }
+  }
+  if (request.method === "POST" && url.pathname === "/v1/animate-existing") {
+    if (!allowRequest(request.socket.remoteAddress || "unknown")) return send(response, 429, { error: "Animation limit reached. Try again later." });
+    try {
+      const payload = await bodyJson(request);
+      const model = dataModel(payload.modelDataUrl);
+      const id = randomUUID(); const token = randomBytes(24).toString("hex");
+      const directory = join(DATA_ROOT, id); const baseModelPath = join(directory, "rigged.glb");
+      await mkdir(directory, { recursive: true }); await writeFile(baseModelPath, model);
+      const job = { id, token, stage: "animating", progress: 88, message: "Preparing the reusable animation library…", createdAt: Date.now(), directory, baseModelPath, cancelled: false };
+      jobs.set(id, job);
+      runBlenderAnimation(job).catch((error) => {
+        job.stage = job.cancelled ? "cancelled" : "failed";
+        job.message = job.cancelled ? "Animation cancelled" : "Blender could not apply the animation library";
+        job.error = error instanceof Error ? error.message : String(error);
+        console.error("Existing-model animation failed", { jobId: job.id, error: job.error });
+      });
       return send(response, 202, { id, token });
     } catch (error) { return send(response, 400, { error: error instanceof Error ? error.message : String(error) }); }
   }
@@ -416,8 +428,10 @@ async function handler(request, response) {
     }
     if (request.method === "GET" && (match[2] === "model" || match[2] === "base-model")) {
       const modelPath = match[2] === "base-model" ? job.baseModelPath : job.modelPath;
-      if (!modelPath || (match[2] === "model" && job.stage !== "completed")) return send(response, 409, { error: "Model is not ready." });
-      const model = await readFile(modelPath); response.writeHead(200, { "content-type": "model/gltf-binary", "content-length": model.length, "cache-control": "private, no-store" }); return response.end(model);
+      if (!modelPath || (match[2] === "model" && !["rig_ready", "completed"].includes(job.stage))) return send(response, 409, { error: "Model is not ready." });
+      const model = await readFile(modelPath);
+      response.writeHead(200, { "content-type": "model/gltf-binary", "content-length": model.length, "cache-control": "private, no-store" });
+      return response.end(model, () => scheduleJobCleanup(job));
     }
     if (request.method === "GET") return send(response, 200, publicJob(job));
   }
@@ -426,9 +440,18 @@ async function handler(request, response) {
 
 await mkdir(DATA_ROOT, { recursive: true });
 setInterval(async () => {
-  const cutoff = Date.now() - 24 * 60 * 60 * 1000;
-  for (const [id, job] of jobs) if (job.createdAt < cutoff) { jobs.delete(id); await rm(job.directory, { recursive: true, force: true }); }
-}, 60 * 60 * 1000).unref();
+  const now = Date.now();
+  for (const [id, job] of jobs) {
+    const terminal = ["completed", "rig_ready", "failed", "cancelled"].includes(job.stage);
+    const expiredAfterDownload = job.deleteAfter && job.deleteAfter <= now;
+    const expiredTerminalJob = terminal && job.createdAt + TERMINAL_JOB_TTL_MS <= now;
+    const expiredMaximumAge = job.createdAt + MAX_JOB_TTL_MS <= now;
+    if (expiredAfterDownload || expiredTerminalJob || expiredMaximumAge) {
+      jobs.delete(id);
+      await rm(job.directory, { recursive: true, force: true });
+    }
+  }
+}, 5 * 60 * 1000).unref();
 
 createServer((request, response) => handler(request, response).catch((error) => send(response, 500, { error: String(error) }))).listen(PORT, HOST, () => {
   console.log(`Desk Pal generation server listening on http://${HOST}:${PORT}`);

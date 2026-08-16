@@ -69,7 +69,7 @@ pub struct InitialAnatomyLandmark { pub name: String, pub image_index: usize, pu
 pub struct InitialAnatomyProfile { pub family: String, pub species: String, pub has_tail: bool, pub has_wings: bool, pub confidence: f32, pub explanation: String, pub landmarks: Vec<InitialAnatomyLandmark> }
 
 fn stage(value: &str) -> GenerationStage {
-    match value { "uploading" => GenerationStage::Uploading, "generating" => GenerationStage::Generating, "rig_check" => GenerationStage::RigCheck, "analyzing" => GenerationStage::Analyzing, "needs_correction" => GenerationStage::NeedsCorrection, "rigging" => GenerationStage::Rigging, "animating" => GenerationStage::Animating, "downloading" => GenerationStage::Downloading, "completed" => GenerationStage::Completed, "cancelled" => GenerationStage::Cancelled, _ => GenerationStage::Failed }
+    match value { "uploading" => GenerationStage::Uploading, "generating" => GenerationStage::Generating, "model_ready" => GenerationStage::ModelReady, "rig_check" => GenerationStage::RigCheck, "analyzing" => GenerationStage::Analyzing, "needs_correction" => GenerationStage::NeedsCorrection, "rigging" => GenerationStage::Rigging, "rig_ready" => GenerationStage::RigReady, "animating" => GenerationStage::Animating, "downloading" => GenerationStage::Downloading, "completed" => GenerationStage::Completed, "cancelled" => GenerationStage::Cancelled, _ => GenerationStage::Failed }
 }
 
 fn body_type(value: &str) -> BodyType {
@@ -160,6 +160,12 @@ async fn run_inner(app: &AppHandle, generation_id: &str, data_urls: &[String], f
         })?;
         publish(app);
         match current_stage {
+            GenerationStage::ModelReady => {
+                if start_existing_rig(app, data_urls, anatomy).await?.is_some() {
+                    animate_existing(app).await?;
+                }
+                return Ok(());
+            }
             GenerationStage::NeedsCorrection => return Ok(()),
             GenerationStage::Completed => {
                 let model_url = job.model_url.ok_or("The completed job did not include a model URL.")?;
@@ -188,32 +194,16 @@ async fn run_inner(app: &AppHandle, generation_id: &str, data_urls: &[String], f
 #[serde(rename_all = "camelCase")]
 struct CorrectedRig { rig_analysis: RigAnalysis }
 
-pub async fn submit_corrections(app: &AppHandle, analysis: RigAnalysis) -> Result<RigAnalysis, String> {
-    let (generation_id, task_id, token) = {
-        let state = app.state::<crate::app_state::RuntimeState>();
-        let value = state.inner.lock().map_err(|_| "State unavailable")?;
-        (value.generation.id.clone().ok_or("The local generation is missing")?, value.generation.task_id.clone().ok_or("The rigging job is missing")?, value.generation.task_token.clone().ok_or("The rigging token is missing")?)
-    };
+async fn monitor_corrected_job(app: &AppHandle, generation_id: String, task_id: String, token: String, corrected: RigAnalysis) -> Result<RigAnalysis, String> {
     let root = server_root();
     let client = reqwest::Client::builder().timeout(Duration::from_secs(30)).build().map_err(|e| e.to_string())?;
-    let response = client
-        .post(format!("{root}/v1/jobs/{task_id}/corrections?token={token}"))
-        .json(&serde_json::json!({
-            "family": analysis.family,
-            "hasTail": analysis.anatomy.tails > 0,
-            "hasWings": analysis.anatomy.wings > 0,
-            "landmarks": analysis.landmarks,
-        }))
-        .send()
-        .await
-        .map_err(|e| format!("Could not save the rig guide: {e}"))?;
-    if !response.status().is_success() { return Err(response_error(response).await); }
-    let corrected = response.json::<CorrectedRig>().await.map(|value| value.rig_analysis).map_err(|e| format!("The rig service returned an invalid guide: {e}"))?;
     mutate(app, |value| {
+        value.generation.task_id = Some(task_id.clone());
+        value.generation.task_token = Some(token.clone());
         value.generation.rig_analysis = Some(corrected.clone());
         value.generation.stage = GenerationStage::Rigging;
         value.generation.progress = 70.0;
-        value.generation.message = "Blender is fitting and skinning the corrected skeleton…".into();
+        value.generation.message = "Optimizing and skinning your 3D pet in Blender…".into();
         value.generation.error = None;
     })?;
     publish(app);
@@ -235,11 +225,17 @@ pub async fn submit_corrections(app: &AppHandle, analysis: RigAnalysis) -> Resul
         })?;
         publish(app);
         match current_stage {
-            GenerationStage::Completed => {
-                let model_url = job.model_url.ok_or("The Blender job did not include a model URL.")?;
-                let target = app_data_dir(app)?.join("candidate").join(&generation_id).join("pet.glb");
+            GenerationStage::RigReady | GenerationStage::Completed => {
+                let model_url = job.model_url.ok_or("The Blender rig job did not include a model URL.")?;
+                let target = app_data_dir(app)?.join("candidate").join(&generation_id).join("rigged.glb");
                 download_model(&client, remote_url(&root, &model_url), &target).await?;
-                mutate(app, |value| { value.generation.candidate_model_path = Some(target.to_string_lossy().into()); })?;
+                mutate(app, |value| {
+                    value.generation.stage = GenerationStage::RigReady;
+                    value.generation.progress = 84.0;
+                    value.generation.message = "Your rigged model is saved. Animation is a separate retryable step.".into();
+                    value.generation.candidate_model_path = Some(target.to_string_lossy().into());
+                    value.generation.error = None;
+                })?;
                 publish(app);
                 return Ok(job.rig_analysis.unwrap_or(corrected));
             }
@@ -248,6 +244,192 @@ pub async fn submit_corrections(app: &AppHandle, analysis: RigAnalysis) -> Resul
         }
     }
     Err("Blender rigging timed out.".into())
+}
+
+pub async fn submit_corrections(app: &AppHandle, analysis: RigAnalysis) -> Result<RigAnalysis, String> {
+    let (generation_id, task_id, token) = {
+        let state = app.state::<crate::app_state::RuntimeState>();
+        let value = state.inner.lock().map_err(|_| "State unavailable")?;
+        (value.generation.id.clone().ok_or("The local generation is missing")?, value.generation.task_id.clone().ok_or("The rigging job is missing")?, value.generation.task_token.clone().ok_or("The rigging token is missing")?)
+    };
+    let root = server_root();
+    let client = reqwest::Client::builder().timeout(Duration::from_secs(30)).build().map_err(|e| e.to_string())?;
+    let response = client
+        .post(format!("{root}/v1/jobs/{task_id}/corrections?token={token}"))
+        .json(&serde_json::json!({
+            "family": analysis.family,
+            "hasTail": analysis.anatomy.tails > 0,
+            "hasWings": analysis.anatomy.wings > 0,
+            "landmarks": analysis.landmarks,
+        }))
+        .send()
+        .await
+        .map_err(|e| format!("Could not save the rig guide: {e}"))?;
+    if !response.status().is_success() { return Err(response_error(response).await); }
+    let corrected = response.json::<CorrectedRig>().await.map(|value| value.rig_analysis).map_err(|e| format!("The rig service returned an invalid guide: {e}"))?;
+    monitor_corrected_job(app, generation_id, task_id, token, corrected).await
+}
+
+pub async fn retry_existing_rig(app: &AppHandle, analysis: RigAnalysis) -> Result<RigAnalysis, String> {
+    let (generation_id, model_path, source_path) = {
+        let state = app.state::<crate::app_state::RuntimeState>();
+        let value = state.inner.lock().map_err(|_| "State unavailable")?;
+        (
+            value.generation.id.clone().ok_or("The local generation is missing")?,
+            value.generation.candidate_model_path.clone().ok_or("The generated 3D model is missing")?,
+            value.generation.candidate_source_path.clone().ok_or("The source image is missing")?,
+        )
+    };
+    let model = tokio::fs::read(&model_path).await.map_err(|e| format!("Could not read the existing 3D model: {e}"))?;
+    if model.len() < 20 || model.len() > 60 * 1024 * 1024 || &model[..4] != b"glTF" { return Err("The existing GLB is invalid or too large.".into()); }
+    let source = tokio::fs::read(&source_path).await.map_err(|e| format!("Could not read the source image: {e}"))?;
+    if source.is_empty() || source.len() > 20 * 1024 * 1024 { return Err("The source image is invalid or too large.".into()); }
+    let mime = match Path::new(&source_path).extension().and_then(|value| value.to_str()).unwrap_or("").to_ascii_lowercase().as_str() {
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        _ => "image/png",
+    };
+    let root = server_root();
+    let client = reqwest::Client::builder().timeout(Duration::from_secs(150)).build().map_err(|e| e.to_string())?;
+    let response = client.post(format!("{root}/v1/rig-existing")).json(&serde_json::json!({
+        "dataUrls": [format!("data:{mime};base64,{}", STANDARD.encode(source))],
+        "modelDataUrl": format!("data:model/gltf-binary;base64,{}", STANDARD.encode(model)),
+        "rigGuide": {
+            "family": analysis.family,
+            "hasTail": analysis.anatomy.tails > 0,
+            "hasWings": analysis.anatomy.wings > 0,
+            "landmarks": analysis.landmarks,
+        },
+    })).send().await.map_err(|e| format!("Could not upload the existing rig for retry: {e}"))?;
+    if !response.status().is_success() { return Err(response_error(response).await); }
+    let created = response.json::<CreatedJob>().await.map_err(|e| format!("The rig retry returned invalid job data: {e}"))?;
+    monitor_corrected_job(app, generation_id, created.id, created.token, analysis).await
+}
+
+pub async fn start_existing_rig(app: &AppHandle, data_urls: &[String], anatomy: &InitialAnatomyProfile) -> Result<Option<RigAnalysis>, String> {
+    let (generation_id, model_path) = {
+        let state = app.state::<crate::app_state::RuntimeState>();
+        let value = state.inner.lock().map_err(|_| "State unavailable")?;
+        (value.generation.id.clone().ok_or("The local generation is missing")?, value.generation.candidate_model_path.clone().ok_or("The saved base model is missing")?)
+    };
+    let model = tokio::fs::read(&model_path).await.map_err(|e| format!("Could not read the saved base model: {e}"))?;
+    if model.len() < 20 || model.len() > 60 * 1024 * 1024 || &model[..4] != b"glTF" { return Err("The saved base GLB is invalid or too large.".into()); }
+    let root = server_root();
+    let client = reqwest::Client::builder().timeout(Duration::from_secs(150)).build().map_err(|e| e.to_string())?;
+    let response = client.post(format!("{root}/v1/rig-existing")).json(&serde_json::json!({
+        "dataUrls": data_urls,
+        "modelDataUrl": format!("data:model/gltf-binary;base64,{}", STANDARD.encode(model)),
+        "anatomyProfile": anatomy,
+    })).send().await.map_err(|e| format!("Could not start the separate rig job: {e}"))?;
+    if !response.status().is_success() { return Err(response_error(response).await); }
+    let created = response.json::<CreatedJob>().await.map_err(|e| format!("The rig service returned invalid job data: {e}"))?;
+    mutate(app, |value| {
+        value.generation.task_id = Some(created.id.clone());
+        value.generation.task_token = Some(created.token.clone());
+        value.generation.stage = GenerationStage::Analyzing;
+        value.generation.progress = 60.0;
+        value.generation.message = "The model is saved. GPT and Blender are starting a separate rig job…".into();
+        value.generation.error = None;
+    })?;
+    publish(app);
+    loop {
+        if app.state::<crate::app_state::RuntimeState>().cancel_generation.load(Ordering::Relaxed) {
+            let _ = client.delete(format!("{root}/v1/jobs/{}?token={}", created.id, created.token)).send().await;
+            return Err("Rigging cancelled.".into());
+        }
+        let response = client.get(format!("{root}/v1/jobs/{}?token={}", created.id, created.token)).send().await.map_err(|e| format!("Lost connection to the separate rig job: {e}"))?;
+        if !response.status().is_success() { return Err(response_error(response).await); }
+        let job = response.json::<RemoteJob>().await.map_err(|e| format!("The rig service returned invalid progress data: {e}"))?;
+        let current_stage = stage(&job.stage);
+        mutate(app, |value| {
+            value.generation.stage = current_stage.clone();
+            value.generation.progress = job.progress.clamp(0.0, 100.0);
+            value.generation.message = job.message.clone();
+            value.generation.error = job.error.clone();
+            if job.rig_analysis.is_some() { value.generation.rig_analysis = job.rig_analysis.clone(); }
+        })?;
+        publish(app);
+        match current_stage {
+            GenerationStage::NeedsCorrection => return Ok(None),
+            GenerationStage::RigReady | GenerationStage::Completed => {
+                let model_url = job.model_url.ok_or("The separate rig job did not include a model URL.")?;
+                let target = app_data_dir(app)?.join("candidate").join(&generation_id).join("rigged.glb");
+                download_model(&client, remote_url(&root, &model_url), &target).await?;
+                mutate(app, |value| {
+                    value.generation.stage = GenerationStage::RigReady;
+                    value.generation.progress = 84.0;
+                    value.generation.message = "Your rigged model is saved. Starting animation separately…".into();
+                    value.generation.candidate_model_path = Some(target.to_string_lossy().into());
+                    value.generation.error = None;
+                })?;
+                publish(app);
+                return Ok(job.rig_analysis);
+            }
+            GenerationStage::Failed | GenerationStage::Cancelled => return Err(job.error.unwrap_or(job.message)),
+            _ => tokio::time::sleep(Duration::from_secs(3)).await,
+        }
+    }
+}
+
+pub async fn animate_existing(app: &AppHandle) -> Result<(), String> {
+    let (generation_id, model_path) = {
+        let state = app.state::<crate::app_state::RuntimeState>();
+        let value = state.inner.lock().map_err(|_| "State unavailable")?;
+        (value.generation.id.clone().ok_or("The local generation is missing")?, value.generation.candidate_model_path.clone().ok_or("The rigged model is missing")?)
+    };
+    let model = tokio::fs::read(&model_path).await.map_err(|e| format!("Could not read the rigged model: {e}"))?;
+    if model.len() < 20 || model.len() > 60 * 1024 * 1024 || &model[..4] != b"glTF" { return Err("The rigged GLB is invalid or too large.".into()); }
+    let root = server_root();
+    let client = reqwest::Client::builder().timeout(Duration::from_secs(150)).build().map_err(|e| e.to_string())?;
+    let response = client.post(format!("{root}/v1/animate-existing")).json(&serde_json::json!({
+        "modelDataUrl": format!("data:model/gltf-binary;base64,{}", STANDARD.encode(model)),
+    })).send().await.map_err(|e| format!("Could not start the separate animation job: {e}"))?;
+    if !response.status().is_success() { return Err(response_error(response).await); }
+    let created = response.json::<CreatedJob>().await.map_err(|e| format!("The animation service returned invalid job data: {e}"))?;
+    mutate(app, |value| {
+        value.generation.task_id = Some(created.id.clone());
+        value.generation.task_token = Some(created.token.clone());
+        value.generation.stage = GenerationStage::Animating;
+        value.generation.progress = 88.0;
+        value.generation.message = "Applying the reusable animation library in a separate job…".into();
+        value.generation.error = None;
+    })?;
+    publish(app);
+    loop {
+        if app.state::<crate::app_state::RuntimeState>().cancel_generation.load(Ordering::Relaxed) {
+            let _ = client.delete(format!("{root}/v1/jobs/{}?token={}", created.id, created.token)).send().await;
+            return Err("Animation cancelled.".into());
+        }
+        let response = client.get(format!("{root}/v1/jobs/{}?token={}", created.id, created.token)).send().await.map_err(|e| format!("Lost connection to the animation job: {e}"))?;
+        if !response.status().is_success() { return Err(response_error(response).await); }
+        let job = response.json::<RemoteJob>().await.map_err(|e| format!("The animation service returned invalid progress data: {e}"))?;
+        let current_stage = stage(&job.stage);
+        mutate(app, |value| {
+            value.generation.stage = current_stage.clone();
+            value.generation.progress = job.progress.clamp(0.0, 100.0);
+            value.generation.message = job.message.clone();
+            value.generation.error = job.error.clone();
+        })?;
+        publish(app);
+        match current_stage {
+            GenerationStage::Completed => {
+                let model_url = job.model_url.ok_or("The animation job did not include a model URL.")?;
+                let target = app_data_dir(app)?.join("candidate").join(&generation_id).join("pet.glb");
+                download_model(&client, remote_url(&root, &model_url), &target).await?;
+                mutate(app, |value| {
+                    value.generation.stage = GenerationStage::Completed;
+                    value.generation.progress = 100.0;
+                    value.generation.message = "Your rigged and animated pet is ready.".into();
+                    value.generation.candidate_model_path = Some(target.to_string_lossy().into());
+                    value.generation.error = None;
+                })?;
+                publish(app);
+                return Ok(());
+            }
+            GenerationStage::Failed | GenerationStage::Cancelled => return Err(job.error.unwrap_or(job.message)),
+            _ => tokio::time::sleep(Duration::from_secs(3)).await,
+        }
+    }
 }
 
 pub(crate) fn parse_data_url(data_url: &str) -> Result<(Vec<u8>, &'static str), String> {
@@ -265,4 +447,9 @@ mod tests {
     #[test] fn rejects_unknown_data_uri() { assert!(parse_data_url("data:image/gif;base64,aGVsbG8=").is_err()); }
     #[test] fn maps_manual_rigging_stage() { assert!(matches!(stage("needs_correction"), GenerationStage::NeedsCorrection)); }
     #[test] fn maps_gpt_anatomy_stage() { assert!(matches!(stage("analyzing"), GenerationStage::Analyzing)); }
+    #[test] fn maps_split_pipeline_stages() {
+        assert!(matches!(stage("model_ready"), GenerationStage::ModelReady));
+        assert!(matches!(stage("rig_ready"), GenerationStage::RigReady));
+        assert!(matches!(stage("animating"), GenerationStage::Animating));
+    }
 }
