@@ -229,6 +229,12 @@ async fn retry_animation(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
+async fn recover_generation(app: AppHandle, state: State<'_, RuntimeState>) -> Result<(), String> {
+    state.cancel_generation.store(false, Ordering::Relaxed);
+    tripo::recover_saved_generation(&app).await
+}
+
+#[tauri::command]
 fn activate_pet(app: AppHandle, config: PetConfig) -> Result<(), String> {
     if config.name.trim().is_empty() || config.name.chars().count() > 28 { return Err("Pet names must contain 1–28 characters.".into()); }
     let (is_new, candidate, source, body, rig_analysis, remote_artifact, selected_id) = {
@@ -508,7 +514,7 @@ pub fn run() {
         .on_window_event(|window, event| {
             if window.label() == "setup" { if let WindowEvent::CloseRequested { api, .. } = event { api.prevent_close(); let _ = window.hide(); } }
         })
-        .invoke_handler(tauri::generate_handler![get_app_snapshot, get_pet_snapshot, select_pet, save_widget_position, preflight_images, start_generation, cancel_generation, use_image_candidate, use_model_candidate, submit_rig_corrections, retry_rigging, retry_animation, activate_pet, delete_pet, discard_pet_candidate, set_paused, set_overlay_mode, set_cursor_passthrough, set_launch_on_startup, ensure_local_model, send_chat, clear_conversation])
+        .invoke_handler(tauri::generate_handler![get_app_snapshot, get_pet_snapshot, select_pet, save_widget_position, preflight_images, start_generation, cancel_generation, use_image_candidate, use_model_candidate, submit_rig_corrections, retry_rigging, retry_animation, recover_generation, activate_pet, delete_pet, discard_pet_candidate, set_paused, set_overlay_mode, set_cursor_passthrough, set_launch_on_startup, ensure_local_model, send_chat, clear_conversation])
         .run(tauri::generate_context!())
         .expect("error while running Desk Pal");
 }

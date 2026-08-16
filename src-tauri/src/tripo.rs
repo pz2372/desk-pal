@@ -97,13 +97,24 @@ fn remote_url(root: &str, value: &str) -> String {
 }
 
 async fn download_model(client: &reqwest::Client, url: String, target: &Path) -> Result<(), String> {
-    let response = client.get(url).send().await.map_err(|e| format!("Could not download the generated model: {e}"))?;
-    if !response.status().is_success() { return Err(response_error(response).await); }
-    let bytes = response.bytes().await.map_err(|e| e.to_string())?;
-    if bytes.len() < 20 || &bytes[..4] != b"glTF" { return Err("The generation service returned an invalid GLB model.".into()); }
-    if let Some(parent) = target.parent() { tokio::fs::create_dir_all(parent).await.map_err(|e| e.to_string())?; }
-    tokio::fs::write(target, &bytes).await.map_err(|e| e.to_string())?;
-    Ok(())
+    let mut last_error = "The model download did not complete.".to_string();
+    for attempt in 0..3 {
+        match client.get(&url).send().await {
+            Ok(response) if response.status().is_success() => match response.bytes().await {
+                Ok(bytes) if bytes.len() >= 20 && &bytes[..4] == b"glTF" => {
+                    if let Some(parent) = target.parent() { tokio::fs::create_dir_all(parent).await.map_err(|e| e.to_string())?; }
+                    tokio::fs::write(target, &bytes).await.map_err(|e| e.to_string())?;
+                    return Ok(());
+                }
+                Ok(_) => last_error = "The generation service returned an invalid GLB model.".into(),
+                Err(error) => last_error = format!("The model response was interrupted: {error}"),
+            },
+            Ok(response) => last_error = response_error(response).await,
+            Err(error) => last_error = format!("Could not download the generated model: {error}"),
+        }
+        if attempt < 2 { tokio::time::sleep(Duration::from_secs(3)).await; }
+    }
+    Err(last_error)
 }
 
 async fn upload_model_artifact(client: &reqwest::Client, root: &str, model: Vec<u8>) -> Result<CreatedJob, String> {
@@ -167,6 +178,48 @@ pub async fn preflight(data_urls: Vec<String>) -> Result<PreflightResult, String
     response.json::<PreflightResult>().await.map_err(|e| format!("The image check returned invalid results: {e}"))
 }
 
+pub async fn recover_saved_generation(app: &AppHandle) -> Result<(), String> {
+    let (generation_id, task_id, token, source_path) = {
+        let state = app.state::<crate::app_state::RuntimeState>();
+        let value = state.inner.lock().map_err(|_| "State unavailable")?;
+        (
+            value.generation.id.clone().ok_or("The local generation is missing")?,
+            value.generation.task_id.clone().ok_or("The saved server job is missing")?,
+            value.generation.task_token.clone().ok_or("The saved server job token is missing")?,
+            value.generation.candidate_source_path.clone().ok_or("The source image is missing")?,
+        )
+    };
+    let root = server_root();
+    let client = reqwest::Client::builder().timeout(Duration::from_secs(300)).build().map_err(|e| e.to_string())?;
+    let response = client.get(format!("{root}/v1/jobs/{task_id}?token={token}")).send().await.map_err(|e| format!("Could not recover the saved generation job: {e}"))?;
+    if !response.status().is_success() { return Err(response_error(response).await); }
+    let job = response.json::<RemoteJob>().await.map_err(|e| format!("The saved generation job returned invalid progress data: {e}"))?;
+    if !matches!(stage(&job.stage), GenerationStage::ModelReady) { return Err(job.error.unwrap_or_else(|| "The saved 3D model is not ready for recovery.".into())); }
+    let model_url = job.base_model_url.ok_or("The saved generation job did not include its base model URL.")?;
+    let target = app_data_dir(app)?.join("candidate").join(&generation_id).join("base.glb");
+    download_model(&client, remote_url(&root, &model_url), &target).await?;
+    mutate(app, |value| {
+        value.generation.stage = GenerationStage::ModelReady;
+        value.generation.progress = 55.0;
+        value.generation.message = "Recovered your saved 3D model without using more Tripo credits.".into();
+        value.generation.candidate_model_path = Some(target.to_string_lossy().into());
+        value.generation.error = None;
+        if let Some(artifact) = job.artifact.as_ref() { value.generation.remote_artifact_id = Some(artifact.id.clone()); value.generation.remote_artifact_token = Some(artifact.token.clone()); }
+    })?;
+    publish(app);
+
+    let source = tokio::fs::read(&source_path).await.map_err(|e| format!("Could not read the saved source image: {e}"))?;
+    let mime = match Path::new(&source_path).extension().and_then(|value| value.to_str()).unwrap_or("").to_ascii_lowercase().as_str() {
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        _ => "image/png",
+    };
+    let data_url = format!("data:{mime};base64,{}", STANDARD.encode(source));
+    let anatomy = InitialAnatomyProfile { family: "unsupported".into(), species: "unknown creature".into(), has_tail: false, has_wings: false, confidence: 0.0, explanation: "Recovered model will be analyzed from the source image and GLB renders.".into(), landmarks: vec![] };
+    if start_existing_rig(app, &[data_url], &anatomy).await?.is_some() { animate_existing(app).await?; }
+    Ok(())
+}
+
 pub async fn run(app: AppHandle, generation_id: String, data_urls: Vec<String>, filenames: Vec<String>, views: Vec<PreflightImage>, anatomy: InitialAnatomyProfile) {
     if let Err(error) = run_inner(&app, &generation_id, &data_urls, &filenames, &views, &anatomy).await {
         let cancelled = app.state::<crate::app_state::RuntimeState>().cancel_generation.load(Ordering::Relaxed);
@@ -183,7 +236,7 @@ pub async fn run(app: AppHandle, generation_id: String, data_urls: Vec<String>, 
 
 async fn run_inner(app: &AppHandle, generation_id: &str, data_urls: &[String], filenames: &[String], views: &[PreflightImage], anatomy: &InitialAnatomyProfile) -> Result<(), String> {
     let root = server_root();
-    let client = reqwest::Client::builder().timeout(Duration::from_secs(100)).build().map_err(|e| e.to_string())?;
+    let client = reqwest::Client::builder().timeout(Duration::from_secs(300)).build().map_err(|e| e.to_string())?;
     let response = client.post(format!("{root}/v1/jobs")).json(&serde_json::json!({ "dataUrls": data_urls, "filenames": filenames, "views": views, "anatomyProfile": anatomy })).send().await.map_err(|e| format!("Could not reach the Desk Pal generation service: {e}"))?;
     if !response.status().is_success() { return Err(response_error(response).await); }
     let created = response.json::<CreatedJob>().await.map_err(|e| format!("The generation service returned an invalid job: {e}"))?;
@@ -258,7 +311,7 @@ struct CorrectedRig { rig_analysis: RigAnalysis }
 
 async fn monitor_corrected_job(app: &AppHandle, generation_id: String, task_id: String, token: String, corrected: RigAnalysis) -> Result<RigAnalysis, String> {
     let root = server_root();
-    let client = reqwest::Client::builder().timeout(Duration::from_secs(30)).build().map_err(|e| e.to_string())?;
+    let client = reqwest::Client::builder().timeout(Duration::from_secs(300)).build().map_err(|e| e.to_string())?;
     mutate(app, |value| {
         value.generation.task_id = Some(task_id.clone());
         value.generation.task_token = Some(token.clone());
@@ -355,7 +408,7 @@ pub async fn retry_existing_rig(app: &AppHandle, analysis: RigAnalysis) -> Resul
         _ => "image/png",
     };
     let root = server_root();
-    let client = reqwest::Client::builder().timeout(Duration::from_secs(150)).build().map_err(|e| e.to_string())?;
+    let client = reqwest::Client::builder().timeout(Duration::from_secs(300)).build().map_err(|e| e.to_string())?;
     let created = create_artifact_job(&client, &root, "/v1/rig-existing", source_job, r2_artifact, model, serde_json::json!({
         "dataUrls": [format!("data:{mime};base64,{}", STANDARD.encode(source))],
         "rigGuide": {
@@ -382,7 +435,7 @@ pub async fn start_existing_rig(app: &AppHandle, data_urls: &[String], anatomy: 
     let model = tokio::fs::read(&model_path).await.map_err(|e| format!("Could not read the saved base model: {e}"))?;
     if model.len() < 20 || model.len() > 60 * 1024 * 1024 || &model[..4] != b"glTF" { return Err("The saved base GLB is invalid or too large.".into()); }
     let root = server_root();
-    let client = reqwest::Client::builder().timeout(Duration::from_secs(150)).build().map_err(|e| e.to_string())?;
+    let client = reqwest::Client::builder().timeout(Duration::from_secs(300)).build().map_err(|e| e.to_string())?;
     let created = create_artifact_job(&client, &root, "/v1/rig-existing", source_job, r2_artifact, model, serde_json::json!({
         "dataUrls": data_urls,
         "anatomyProfile": anatomy,
@@ -450,7 +503,7 @@ pub async fn animate_existing(app: &AppHandle) -> Result<(), String> {
     let model = tokio::fs::read(&model_path).await.map_err(|e| format!("Could not read the rigged model: {e}"))?;
     if model.len() < 20 || model.len() > 60 * 1024 * 1024 || &model[..4] != b"glTF" { return Err("The rigged GLB is invalid or too large.".into()); }
     let root = server_root();
-    let client = reqwest::Client::builder().timeout(Duration::from_secs(150)).build().map_err(|e| e.to_string())?;
+    let client = reqwest::Client::builder().timeout(Duration::from_secs(300)).build().map_err(|e| e.to_string())?;
     let created = create_artifact_job(&client, &root, "/v1/animate-existing", source_job, r2_artifact, model, serde_json::json!({})).await?;
     mutate(app, |value| {
         value.generation.task_id = Some(created.id.clone());

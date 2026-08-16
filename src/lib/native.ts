@@ -26,6 +26,7 @@ export const useModelCandidate = () => command<void>("use_model_candidate");
 export const submitRigCorrections = (analysis: RigAnalysis) => command<void>("submit_rig_corrections", { analysis });
 export const retryRigging = () => command<void>("retry_rigging");
 export const retryAnimation = () => command<void>("retry_animation");
+export const recoverGeneration = () => command<void>("recover_generation");
 export const activatePet = (config: PetConfig) => command<void>("activate_pet", { config });
 export const setPaused = (paused: boolean, petId?: string) => command<void>("set_paused", { paused, petId });
 export const setOverlayMode = (mode: PetConfig["overlayMode"], petId?: string) => command<void>("set_overlay_mode", { mode, petId });

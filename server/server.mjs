@@ -37,7 +37,7 @@ function send(response, status, payload, headers = {}) {
 }
 
 function publicJob(job) {
-  return { id: job.id, stage: job.stage, progress: job.progress, message: job.message, error: job.error, analysisStep: job.analysisStep, bodyType: job.bodyType, rigAnalysis: job.rigAnalysis, artifact: job.r2Artifact, baseModelUrl: job.baseModelPath ? `/v1/jobs/${job.id}/base-model?token=${job.token}` : undefined, modelUrl: ["rig_ready", "completed"].includes(job.stage) ? `/v1/jobs/${job.id}/model?token=${job.token}` : undefined };
+  return { id: job.id, stage: job.stage, progress: job.progress, message: job.message, error: job.error, analysisStep: job.analysisStep, bodyType: job.bodyType, rigAnalysis: job.rigAnalysis, artifact: job.r2Artifact, baseModelUrl: job.stage === "model_ready" && job.baseModelPath ? `/v1/jobs/${job.id}/base-model?token=${job.token}` : undefined, modelUrl: ["rig_ready", "completed"].includes(job.stage) ? `/v1/jobs/${job.id}/model?token=${job.token}` : undefined };
 }
 
 function scheduleJobCleanup(job, ttlMs = DOWNLOADED_JOB_TTL_MS) {
