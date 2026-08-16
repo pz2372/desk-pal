@@ -38,6 +38,8 @@ export function SetupFlow() {
     setSnapshot(value);
     if (value.pet) setConfig(value.pet);
     if (value.lifecycle === "ready") setScreen("controls");
+    else if (value.generation.stage === "completed") { setScreen("onboarding"); setStep(3); }
+    else if (value.generation.id && value.generation.stage !== "idle") { setScreen("onboarding"); setStep(2); }
   }).catch((e) => setError(String(e))); }, []);
 
   useEffect(() => {
