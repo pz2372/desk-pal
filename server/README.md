@@ -35,6 +35,13 @@ applies the reusable `idle`, `walk`, `turn`, `jump`, and `react` library and sav
 `pet.glb`. A rig or animation retry therefore reuses the last successful local
 artifact and never repeats paid Tripo model generation.
 
+During an active creation session, each new job references the previous Render
+job's temporary GLB by its protected job ID and token. The base model therefore
+moves into rigging, and the rigged model into animation, without being uploaded
+again. If that temporary copy has already expired, the desktop falls back to a
+raw `model/gltf-binary` artifact upload from its local copy; GLBs are never
+base64-encoded into large JSON requests.
+
 Render is temporary compute, not the pet database. It keeps a processing copy only
 while a job is running and long enough for the desktop to download the result.
 Downloaded artifacts are queued for deletion after 15 minutes; other terminal jobs

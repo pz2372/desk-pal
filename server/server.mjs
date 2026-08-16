@@ -13,6 +13,7 @@ const TRIPO_API_KEY = process.env.TRIPO_API_KEY;
 const API_ROOT = "https://api.tripo3d.ai/v2/openapi";
 const DATA_ROOT = new URL("./data/jobs/", import.meta.url).pathname;
 const jobs = new Map();
+const artifacts = new Map();
 const rateBuckets = new Map();
 const preflightBuckets = new Map();
 const MAX_BODY = 85 * 1024 * 1024;
@@ -59,6 +60,18 @@ async function bodyJson(request) {
   return JSON.parse(Buffer.concat(chunks).toString("utf8"));
 }
 
+async function bodyModel(request) {
+  const chunks = []; let size = 0;
+  for await (const chunk of request) {
+    size += chunk.length;
+    if (size > 60 * 1024 * 1024) throw new Error("The GLB model is larger than 60 MB.");
+    chunks.push(chunk);
+  }
+  const data = Buffer.concat(chunks);
+  if (data.length < 20 || data.subarray(0, 4).toString() !== "glTF") throw new Error("The uploaded GLB model is invalid.");
+  return data;
+}
+
 function dataImage(dataUrl) {
   const match = /^data:(image\/(?:png|jpeg|webp));base64,([A-Za-z0-9+/=]+)$/.exec(dataUrl || "");
   if (!match) throw new Error("Only PNG, JPEG, and WebP data URLs are accepted.");
@@ -74,6 +87,35 @@ function dataModel(dataUrl) {
   const data = Buffer.from(match[1], "base64");
   if (data.length < 20 || data.length > 60 * 1024 * 1024 || data.subarray(0, 4).toString() !== "glTF") throw new Error("The GLB model is invalid or larger than 60 MB.");
   return data;
+}
+
+async function resolveModelArtifact(payload) {
+  if (payload?.sourceJob?.id && payload?.sourceJob?.token) {
+    const source = jobs.get(String(payload.sourceJob.id));
+    if (!source || source.token !== payload.sourceJob.token) {
+      const error = new Error("The temporary server model has expired.");
+      error.status = 410;
+      throw error;
+    }
+    const sourcePath = source.modelPath || source.baseModelPath;
+    if (!sourcePath) throw new Error("The source job does not have a usable model yet.");
+    scheduleJobCleanup(source);
+    return readFile(sourcePath);
+  }
+  if (payload?.modelArtifact?.id && payload?.modelArtifact?.token) {
+    const id = String(payload.modelArtifact.id);
+    const artifact = artifacts.get(id);
+    if (!artifact || artifact.token !== payload.modelArtifact.token) {
+      const error = new Error("The uploaded model artifact has expired.");
+      error.status = 410;
+      throw error;
+    }
+    artifacts.delete(id);
+    const model = await readFile(artifact.path);
+    await rm(artifact.path, { force: true });
+    return model;
+  }
+  return dataModel(payload?.modelDataUrl);
 }
 
 async function tripo(path, options = {}) {
@@ -355,6 +397,17 @@ async function handler(request, response) {
       return send(response, 202, { id, token });
     } catch (error) { return send(response, 400, { error: error instanceof Error ? error.message : String(error) }); }
   }
+  if (request.method === "POST" && url.pathname === "/v1/artifacts") {
+    try {
+      if (request.headers["content-type"] !== "model/gltf-binary") throw new Error("Use model/gltf-binary for GLB artifact uploads.");
+      const model = await bodyModel(request);
+      const id = randomUUID(); const token = randomBytes(24).toString("hex");
+      const directory = join(DATA_ROOT, "artifacts"); const path = join(directory, `${id}.glb`);
+      await mkdir(directory, { recursive: true }); await writeFile(path, model);
+      artifacts.set(id, { id, token, path, createdAt: Date.now() });
+      return send(response, 201, { id, token });
+    } catch (error) { return send(response, 400, { error: error instanceof Error ? error.message : String(error) }); }
+  }
   if (request.method === "POST" && url.pathname === "/v1/rig-existing") {
     if (!process.env.OPENAI_API_KEY) return send(response, 503, { error: "Smart rigging is not configured." });
     if (!allowRequest(request.socket.remoteAddress || "unknown")) return send(response, 429, { error: "Rigging limit reached. Try again later." });
@@ -363,7 +416,7 @@ async function handler(request, response) {
       const dataUrls = Array.isArray(payload.dataUrls) ? payload.dataUrls : [payload.dataUrl];
       if (dataUrls.length < 1 || dataUrls.length > 3) throw new Error("Choose between one and three reference images.");
       const images = dataUrls.map(dataImage);
-      const model = dataModel(payload.modelDataUrl);
+      const model = await resolveModelArtifact(payload);
       const id = randomUUID(); const token = randomBytes(24).toString("hex");
       const directory = join(DATA_ROOT, id); const baseModelPath = join(directory, "base.glb");
       await mkdir(directory, { recursive: true }); await writeFile(baseModelPath, model);
@@ -384,13 +437,13 @@ async function handler(request, response) {
         smartRigFallback(job, images, "biped", "Please help locate this character’s body parts.", initialAnatomy);
       }
       return send(response, 202, { id, token });
-    } catch (error) { return send(response, 400, { error: error instanceof Error ? error.message : String(error) }); }
+    } catch (error) { return send(response, Number(error?.status) || 400, { error: error instanceof Error ? error.message : String(error) }); }
   }
   if (request.method === "POST" && url.pathname === "/v1/animate-existing") {
     if (!allowRequest(request.socket.remoteAddress || "unknown")) return send(response, 429, { error: "Animation limit reached. Try again later." });
     try {
       const payload = await bodyJson(request);
-      const model = dataModel(payload.modelDataUrl);
+      const model = await resolveModelArtifact(payload);
       const id = randomUUID(); const token = randomBytes(24).toString("hex");
       const directory = join(DATA_ROOT, id); const baseModelPath = join(directory, "rigged.glb");
       await mkdir(directory, { recursive: true }); await writeFile(baseModelPath, model);
@@ -403,7 +456,7 @@ async function handler(request, response) {
         console.error("Existing-model animation failed", { jobId: job.id, error: job.error });
       });
       return send(response, 202, { id, token });
-    } catch (error) { return send(response, 400, { error: error instanceof Error ? error.message : String(error) }); }
+    } catch (error) { return send(response, Number(error?.status) || 400, { error: error instanceof Error ? error.message : String(error) }); }
   }
   const match = /^\/v1\/jobs\/([0-9a-f-]+)(?:\/(model|base-model|corrections))?$/.exec(url.pathname);
   if (match) {
@@ -449,6 +502,12 @@ setInterval(async () => {
     if (expiredAfterDownload || expiredTerminalJob || expiredMaximumAge) {
       jobs.delete(id);
       await rm(job.directory, { recursive: true, force: true });
+    }
+  }
+  for (const [id, artifact] of artifacts) {
+    if (artifact.createdAt + TERMINAL_JOB_TTL_MS <= now) {
+      artifacts.delete(id);
+      await rm(artifact.path, { force: true });
     }
   }
 }, 5 * 60 * 1000).unref();

@@ -97,6 +97,45 @@ async fn download_model(client: &reqwest::Client, url: String, target: &Path) ->
     Ok(())
 }
 
+async fn upload_model_artifact(client: &reqwest::Client, root: &str, model: Vec<u8>) -> Result<CreatedJob, String> {
+    let response = client
+        .post(format!("{root}/v1/artifacts"))
+        .header(reqwest::header::CONTENT_TYPE, "model/gltf-binary")
+        .body(model)
+        .send()
+        .await
+        .map_err(|e| format!("Could not upload the saved GLB artifact: {e}"))?;
+    if !response.status().is_success() { return Err(response_error(response).await); }
+    response.json::<CreatedJob>().await.map_err(|e| format!("The artifact service returned invalid data: {e}"))
+}
+
+async fn create_artifact_job(
+    client: &reqwest::Client,
+    root: &str,
+    endpoint: &str,
+    source_job: Option<(String, String)>,
+    model: Vec<u8>,
+    mut payload: serde_json::Value,
+) -> Result<CreatedJob, String> {
+    if let (Some(source), Some(object)) = (source_job.as_ref(), payload.as_object_mut()) {
+        object.insert("sourceJob".into(), serde_json::json!({ "id": source.0, "token": source.1 }));
+    }
+    let response = client.post(format!("{root}{endpoint}")).json(&payload).send().await.map_err(|e| format!("Could not start the processing job: {e}"))?;
+    if response.status().is_success() {
+        return response.json::<CreatedJob>().await.map_err(|e| format!("The processing service returned invalid job data: {e}"));
+    }
+    if !matches!(response.status().as_u16(), 404 | 409 | 410) { return Err(response_error(response).await); }
+
+    let artifact = upload_model_artifact(client, root, model).await?;
+    if let Some(object) = payload.as_object_mut() {
+        object.remove("sourceJob");
+        object.insert("modelArtifact".into(), serde_json::json!({ "id": artifact.id, "token": artifact.token }));
+    }
+    let response = client.post(format!("{root}{endpoint}")).json(&payload).send().await.map_err(|e| format!("Could not start the processing job after uploading the local artifact: {e}"))?;
+    if !response.status().is_success() { return Err(response_error(response).await); }
+    response.json::<CreatedJob>().await.map_err(|e| format!("The processing service returned invalid job data: {e}"))
+}
+
 pub async fn preflight(data_urls: Vec<String>) -> Result<PreflightResult, String> {
     if data_urls.is_empty() || data_urls.len() > 3 { return Err("Choose between one and three images.".into()); }
     let root = server_root();
@@ -271,13 +310,14 @@ pub async fn submit_corrections(app: &AppHandle, analysis: RigAnalysis) -> Resul
 }
 
 pub async fn retry_existing_rig(app: &AppHandle, analysis: RigAnalysis) -> Result<RigAnalysis, String> {
-    let (generation_id, model_path, source_path) = {
+    let (generation_id, model_path, source_path, source_job) = {
         let state = app.state::<crate::app_state::RuntimeState>();
         let value = state.inner.lock().map_err(|_| "State unavailable")?;
         (
             value.generation.id.clone().ok_or("The local generation is missing")?,
             value.generation.candidate_model_path.clone().ok_or("The generated 3D model is missing")?,
             value.generation.candidate_source_path.clone().ok_or("The source image is missing")?,
+            value.generation.task_id.clone().zip(value.generation.task_token.clone()),
         )
     };
     let model = tokio::fs::read(&model_path).await.map_err(|e| format!("Could not read the existing 3D model: {e}"))?;
@@ -291,38 +331,36 @@ pub async fn retry_existing_rig(app: &AppHandle, analysis: RigAnalysis) -> Resul
     };
     let root = server_root();
     let client = reqwest::Client::builder().timeout(Duration::from_secs(150)).build().map_err(|e| e.to_string())?;
-    let response = client.post(format!("{root}/v1/rig-existing")).json(&serde_json::json!({
+    let created = create_artifact_job(&client, &root, "/v1/rig-existing", source_job, model, serde_json::json!({
         "dataUrls": [format!("data:{mime};base64,{}", STANDARD.encode(source))],
-        "modelDataUrl": format!("data:model/gltf-binary;base64,{}", STANDARD.encode(model)),
         "rigGuide": {
             "family": analysis.family,
             "hasTail": analysis.anatomy.tails > 0,
             "hasWings": analysis.anatomy.wings > 0,
             "landmarks": analysis.landmarks,
         },
-    })).send().await.map_err(|e| format!("Could not upload the existing rig for retry: {e}"))?;
-    if !response.status().is_success() { return Err(response_error(response).await); }
-    let created = response.json::<CreatedJob>().await.map_err(|e| format!("The rig retry returned invalid job data: {e}"))?;
+    })).await?;
     monitor_corrected_job(app, generation_id, created.id, created.token, analysis).await
 }
 
 pub async fn start_existing_rig(app: &AppHandle, data_urls: &[String], anatomy: &InitialAnatomyProfile) -> Result<Option<RigAnalysis>, String> {
-    let (generation_id, model_path) = {
+    let (generation_id, model_path, source_job) = {
         let state = app.state::<crate::app_state::RuntimeState>();
         let value = state.inner.lock().map_err(|_| "State unavailable")?;
-        (value.generation.id.clone().ok_or("The local generation is missing")?, value.generation.candidate_model_path.clone().ok_or("The saved base model is missing")?)
+        (
+            value.generation.id.clone().ok_or("The local generation is missing")?,
+            value.generation.candidate_model_path.clone().ok_or("The saved base model is missing")?,
+            value.generation.task_id.clone().zip(value.generation.task_token.clone()),
+        )
     };
     let model = tokio::fs::read(&model_path).await.map_err(|e| format!("Could not read the saved base model: {e}"))?;
     if model.len() < 20 || model.len() > 60 * 1024 * 1024 || &model[..4] != b"glTF" { return Err("The saved base GLB is invalid or too large.".into()); }
     let root = server_root();
     let client = reqwest::Client::builder().timeout(Duration::from_secs(150)).build().map_err(|e| e.to_string())?;
-    let response = client.post(format!("{root}/v1/rig-existing")).json(&serde_json::json!({
+    let created = create_artifact_job(&client, &root, "/v1/rig-existing", source_job, model, serde_json::json!({
         "dataUrls": data_urls,
-        "modelDataUrl": format!("data:model/gltf-binary;base64,{}", STANDARD.encode(model)),
         "anatomyProfile": anatomy,
-    })).send().await.map_err(|e| format!("Could not start the separate rig job: {e}"))?;
-    if !response.status().is_success() { return Err(response_error(response).await); }
-    let created = response.json::<CreatedJob>().await.map_err(|e| format!("The rig service returned invalid job data: {e}"))?;
+    })).await?;
     mutate(app, |value| {
         value.generation.task_id = Some(created.id.clone());
         value.generation.task_token = Some(created.token.clone());
@@ -372,20 +410,20 @@ pub async fn start_existing_rig(app: &AppHandle, data_urls: &[String], anatomy: 
 }
 
 pub async fn animate_existing(app: &AppHandle) -> Result<(), String> {
-    let (generation_id, model_path) = {
+    let (generation_id, model_path, source_job) = {
         let state = app.state::<crate::app_state::RuntimeState>();
         let value = state.inner.lock().map_err(|_| "State unavailable")?;
-        (value.generation.id.clone().ok_or("The local generation is missing")?, value.generation.candidate_model_path.clone().ok_or("The rigged model is missing")?)
+        (
+            value.generation.id.clone().ok_or("The local generation is missing")?,
+            value.generation.candidate_model_path.clone().ok_or("The rigged model is missing")?,
+            value.generation.task_id.clone().zip(value.generation.task_token.clone()),
+        )
     };
     let model = tokio::fs::read(&model_path).await.map_err(|e| format!("Could not read the rigged model: {e}"))?;
     if model.len() < 20 || model.len() > 60 * 1024 * 1024 || &model[..4] != b"glTF" { return Err("The rigged GLB is invalid or too large.".into()); }
     let root = server_root();
     let client = reqwest::Client::builder().timeout(Duration::from_secs(150)).build().map_err(|e| e.to_string())?;
-    let response = client.post(format!("{root}/v1/animate-existing")).json(&serde_json::json!({
-        "modelDataUrl": format!("data:model/gltf-binary;base64,{}", STANDARD.encode(model)),
-    })).send().await.map_err(|e| format!("Could not start the separate animation job: {e}"))?;
-    if !response.status().is_success() { return Err(response_error(response).await); }
-    let created = response.json::<CreatedJob>().await.map_err(|e| format!("The animation service returned invalid job data: {e}"))?;
+    let created = create_artifact_job(&client, &root, "/v1/animate-existing", source_job, model, serde_json::json!({})).await?;
     mutate(app, |value| {
         value.generation.task_id = Some(created.id.clone());
         value.generation.task_token = Some(created.token.clone());
